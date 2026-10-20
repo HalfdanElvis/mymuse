@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rodio = { version = "0.23", features = ["symphonia-all"] }
+walkdir = "2.5"
+lofty = "0.25.4"
