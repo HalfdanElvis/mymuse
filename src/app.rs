@@ -1,6 +1,5 @@
 // src/app.rs
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use rodio::Player;
@@ -14,6 +13,7 @@ use winit::{
 };
 
 use crate::audio;
+use crate::nav::{Level, NavState};
 use crate::ui::{NowPlaying, UiEngine, UiFrame};
 
 pub const WIDTH: u32 = 320;
@@ -34,9 +34,6 @@ pub struct App {
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     ui: UiEngine,
-    menu_items: Vec<String>,
-    album_tracks: Vec<Vec<PathBuf>>,
-    selected_index: usize,
     player: Player,
     _audio_handle: rodio::MixerDeviceSink,
     header_title: String,
@@ -44,13 +41,13 @@ pub struct App {
     battery: f32,
     bluetooth: bool,
     headphones: bool,
+    nav: NavState,
 }
 
 impl App {
     pub fn new(
         ui: UiEngine,
-        menu_items: Vec<String>,
-        album_tracks: Vec<Vec<PathBuf>>,
+        nav: NavState,
         player: Player,
         audio_handle: rodio::MixerDeviceSink,
     ) -> Self {
@@ -58,9 +55,6 @@ impl App {
             window: None,
             surface: None,
             ui,
-            menu_items,
-            album_tracks,
-            selected_index: 0,
             player,
             _audio_handle: audio_handle,
             header_title: "MyMuse".to_string(),
@@ -68,6 +62,7 @@ impl App {
             battery: 1.0,
             bluetooth: false,
             headphones: false,
+            nav,
         }
     }
 }
@@ -120,51 +115,61 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => match key_code {
                 KeyCode::Escape => event_loop.exit(),
+                KeyCode::Backspace => {
+                    if !self.nav.back() {
+                        //Maybe use this to go into sleep mode or let it be a toggle in settings
+                    } else {
+                        self.window.as_ref().unwrap().request_redraw();
+                    }
+                }
                 KeyCode::ArrowDown => {
-                    // BUGFIX: used saturating_sub to prevent panic if menu is empty
-                    if self.selected_index < self.menu_items.len().saturating_sub(1) {
-                        self.selected_index += 1;
+                    let (_, idx) = self.nav.current();
+                    let items_len = self.nav.get_items().len();
+
+                    if *idx < items_len.saturating_sub(1) {
+                        if let Some((_, idx_mut)) = self.nav.level_stack.last_mut() {
+                            *idx_mut += 1;
+                        }
                         self.window.as_ref().unwrap().request_redraw();
                     }
                 }
                 KeyCode::ArrowUp => {
-                    if self.selected_index > 0 {
-                        self.selected_index -= 1;
+                    let (_, idx) = self.nav.current();
+
+                    if *idx > 0 {
+                        if let Some((_, idx_mut)) = self.nav.level_stack.last_mut() {
+                            *idx_mut -= 1;
+                        }
                         self.window.as_ref().unwrap().request_redraw();
                     }
                 }
                 KeyCode::Enter => {
                     // Find selected
-                    let selected_track = self
-                        .album_tracks
-                        .get(self.selected_index)
-                        .and_then(|tracks| tracks.first());
-                    if let Some(track_path) = selected_track {
-                        // 2. Delegate the heavy lifting to the audio module
-                        match audio::play_track(&self.player, track_path) {
+                    //
+                    if let Some(track_path) = self.nav.enter() {
+                        match audio::play_track(&self.player, &track_path) {
                             Ok(info) => {
                                 println!("Playing: {}", info.title);
 
                                 // 3. Update the UI state
-                                let artist = self.menu_items[self.selected_index]
-                                    .split(" - ")
-                                    .next()
-                                    .unwrap_or("")
-                                    .to_string();
+
+                                let artist = match &self.nav.current().0 {
+                                    Level::TracksOf(artist, _) => artist.clone(),
+                                    _ => "Unknown Artist".to_string(),
+                                };
 
                                 self.now_playing = Some(NowPlayingState {
                                     title: info.title,
                                     artist,
                                     duration: info.duration,
                                 });
-                                self.window.as_ref().unwrap().request_redraw();
                             }
                             Err(e) => {
-                                // If it's a bad file, we actually see why now!
                                 eprintln!("Error playing track: {}", e);
                             }
                         }
                     }
+                    self.window.as_ref().unwrap().request_redraw();
                 }
                 _ => {}
             },
@@ -173,10 +178,24 @@ impl ApplicationHandler<UserEvent> for App {
                     let clock = clock_string();
                     let elapsed = self.player.get_pos().as_secs_f32();
 
+                    // Fetch data from Navstate and generate title based on curr level
+                    let items = self.nav.get_items();
+                    let selected_index = self.nav.current().1;
+
+                    let title = match &self.nav.current().0 {
+                        Level::Root => "MyMuse".to_string(),
+                        Level::Artists => "Artists".to_string(),
+                        Level::AlbumsOf(a) => a.clone(),
+                        Level::TracksOf(a, al) => {
+                            format!("{} - {}", a, al)
+                        }
+                        Level::AllSongs => "All Songs".to_string(),
+                    };
+
                     let frame = UiFrame {
-                        items: &self.menu_items,
-                        selected_index: self.selected_index,
-                        title: &self.header_title,
+                        items: &items,
+                        selected_index,
+                        title: &title,
                         clock: &clock,
                         battery: self.battery,
                         bluetooth: self.bluetooth,
