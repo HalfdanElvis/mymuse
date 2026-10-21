@@ -189,7 +189,8 @@ impl ApplicationHandler<UserEvent> for App {
                         Level::TracksOf(a, al) => {
                             format!("{} - {}", a, al)
                         }
-                        Level::AllSongs => "All Songs".to_string(),
+                        Level::AllAlbums => "Albums".to_string(),
+                        Level::AllSongs => "Songs".to_string(),
                     };
 
                     let frame = UiFrame {
