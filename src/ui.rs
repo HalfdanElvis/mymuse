@@ -1,7 +1,10 @@
 use fontdue::{Font, FontSettings};
 use mlua::{Lua, Table};
-use std::{fs, os::linux::raw::stat};
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
+use std::fs;
+use tiny_skia::{
+    Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, Point, Rect,
+    SpreadMode, Transform,
+};
 
 pub struct NowPlaying<'a> {
     pub title: &'a str,
@@ -19,6 +22,18 @@ pub struct UiFrame<'a> {
     pub bluetooth: bool,
     pub headphones: bool,
     pub now: Option<NowPlaying<'a>>,
+    pub list_scroll: Option<(f32, f32)>,
+    pub now_scroll: Option<(f32, f32)>,
+    pub is_reversing: bool,
+}
+
+pub struct LayoutConfig {
+    pub font_size_list: f32,
+    pub list_item_max_width: f32,
+    pub font_size_nowplay: f32,
+    pub nowplay_max_width: f32,
+    pub list_scroll_gap: f32,
+    pub nowplay_scroll_gap: f32,
 }
 
 pub struct UiEngine {
@@ -26,6 +41,7 @@ pub struct UiEngine {
     pixmap: Pixmap,
     font: Font,
     line_ratio: f32,
+    pub layout: LayoutConfig,
     buffer: Vec<u32>,
     width: usize,
     height: usize,
@@ -53,11 +69,25 @@ impl UiEngine {
         let script = fs::read_to_string("ui.lua").expect("Could not find ui.lua");
         lua.load(&script).exec().expect("Failed to run Lua script");
 
+        // 4. Read layout config from Lua
+        let config_fn: mlua::Function = lua.globals().get("get_layout_config").unwrap();
+        let config_table: mlua::Table = config_fn.call(()).unwrap();
+
+        let layout = LayoutConfig {
+            font_size_list: config_table.get("ITEM_FONT").unwrap(),
+            list_item_max_width: config_table.get("LIST_ITEM_MAX_WIDTH").unwrap(),
+            font_size_nowplay: config_table.get("NOWPLAY_TITLE_FONT").unwrap(),
+            nowplay_max_width: config_table.get("NOWPLAY_MAX_WIDTH").unwrap(),
+            list_scroll_gap: config_table.get("LIST_SCROLL_GAP").unwrap(),
+            nowplay_scroll_gap: config_table.get("NOWPLAY_SCROLL_GAP").unwrap(),
+        };
+
         Self {
             lua,
             pixmap,
             font,
             line_ratio,
+            layout,
             buffer,
             width,
             height,
@@ -88,6 +118,7 @@ impl UiEngine {
         state.set("battery", frame.battery).unwrap();
         state.set("bluetooth", frame.bluetooth).unwrap();
         state.set("headphones", frame.headphones).unwrap();
+        state.set("is_reversing", frame.is_reversing).unwrap();
 
         if let Some(np) = frame.now {
             let table = self.lua.create_table().unwrap();
@@ -96,6 +127,20 @@ impl UiEngine {
             table.set("elapsed", np.elapsed).unwrap();
             table.set("duration", np.duration).unwrap();
             state.set("now", table).unwrap();
+        }
+
+        if let Some((offset, width)) = frame.list_scroll {
+            let t = self.lua.create_table().unwrap();
+            t.set(1, offset).unwrap();
+            t.set(2, width).unwrap();
+            state.set("list_scroll", t).unwrap();
+        }
+
+        if let Some((offset, width)) = frame.now_scroll {
+            let t = self.lua.create_table().unwrap();
+            t.set(1, offset).unwrap();
+            t.set(2, width).unwrap();
+            state.set("now_scroll", t).unwrap();
         }
 
         // 3. Call Lua draw_screen
@@ -109,6 +154,8 @@ impl UiEngine {
 
             if cmd_type == "rect" {
                 self.draw_rect(&cmd);
+            } else if cmd_type == "gradient_rect" {
+                self.draw_gradient_rect(&cmd);
             } else if cmd_type == "text" {
                 self.draw_text(&cmd);
             }
@@ -152,13 +199,62 @@ impl UiEngine {
         );
     }
 
+    fn draw_gradient_rect(&mut self, cmd: &Table) {
+        let x: f32 = cmd.get("x").unwrap();
+        let y: f32 = cmd.get("y").unwrap();
+        let w: f32 = cmd.get("width").unwrap();
+        let h: f32 = cmd.get("height").unwrap();
+        let color_start_hex: u32 = cmd.get("color_start").unwrap();
+        let color_end_hex: u32 = cmd.get("color_end").unwrap();
+
+        let c_start = Color::from_rgba8(
+            ((color_start_hex >> 16) & 0xFF) as u8,
+            ((color_start_hex >> 8) & 0xFF) as u8,
+            (color_start_hex & 0xFF) as u8,
+            ((color_start_hex >> 24) & 0xFF) as u8,
+        );
+        let c_end = Color::from_rgba8(
+            ((color_end_hex >> 16) & 0xFF) as u8,
+            ((color_end_hex >> 8) & 0xFF) as u8,
+            (color_end_hex & 0xFF) as u8,
+            ((color_end_hex >> 24) & 0xFF) as u8,
+        );
+
+        let shader = LinearGradient::new(
+            Point::from_xy(x, y),
+            Point::from_xy(x, y + h),
+            vec![
+                GradientStop::new(0.0, c_start),
+                GradientStop::new(1.0, c_end),
+            ],
+            SpreadMode::Pad,
+            Transform::identity(),
+        )
+        .unwrap();
+
+        let mut paint = Paint::default();
+        paint.shader = shader;
+
+        let rect = Rect::from_xywh(x, y, w, h).unwrap();
+        let path = PathBuilder::from_rect(rect);
+        self.pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+
     fn draw_text(&mut self, cmd: &Table) {
         let x: f32 = cmd.get("x").unwrap();
         let y: f32 = cmd.get("y").unwrap();
         let text: String = cmd.get("text").unwrap();
         let color_hex: u32 = cmd.get("color").unwrap();
         let size: f32 = cmd.get("size").unwrap();
-        let max_width: Option<f32> = cmd.get("max_width").ok();
+
+        let clip_left: Option<f32> = cmd.get("clip_left").ok();
+        let clip_right: Option<f32> = cmd.get("clip_right").ok();
 
         let r = ((color_hex >> 16) & 0xFF) as u8;
         let g = ((color_hex >> 8) & 0xFF) as u8;
@@ -172,13 +268,14 @@ impl UiEngine {
             .unwrap_or(size);
         let baseline = (y + ascent).round() as i32;
 
-        let right_limit = match max_width {
-            Some(mw) => (x + mw) as i32,
-            None => self.width as i32,
-        };
+        let left_limit = clip_left.map(|l| l.round() as i32).unwrap_or(0);
+        let right_limit = clip_right
+            .map(|r| r.round() as i32)
+            .unwrap_or(self.width as i32);
 
         let mut pen_x = x;
         for c in text.chars() {
+            // Stop rendering if we hit the absolute right edge
             if pen_x >= right_limit as f32 {
                 break;
             }
@@ -194,7 +291,7 @@ impl UiEngine {
                 }
                 for col in 0..metrics.width {
                     let px = left + col as i32;
-                    if px < 0 || px >= right_limit {
+                    if px < left_limit || px >= right_limit {
                         continue;
                     }
 
@@ -216,5 +313,14 @@ impl UiEngine {
             }
             pen_x += metrics.advance_width;
         }
+    }
+
+    pub fn measure_text(&self, text: &str, size: f32) -> f32 {
+        let mut width = 0.0;
+        for c in text.chars() {
+            let (metrics, _) = self.font.rasterize(c, size);
+            width += metrics.advance_width;
+        }
+        width
     }
 }

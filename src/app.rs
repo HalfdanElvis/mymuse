@@ -1,6 +1,7 @@
 // src/app.rs
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rodio::Player;
 use winit::{
@@ -18,6 +19,9 @@ use crate::ui::{NowPlaying, UiEngine, UiFrame};
 
 pub const WIDTH: u32 = 320;
 pub const HEIGHT: u32 = 240;
+pub const SCROLL_START_TIME: f32 = 1.0;
+pub const SCROLL_SPEED: f32 = 30.0;
+pub const MIN_LOOP_DISTANCE: f32 = 20.0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum UserEvent {
@@ -36,12 +40,14 @@ pub struct App {
     ui: UiEngine,
     player: Player,
     _audio_handle: rodio::MixerDeviceSink,
-    header_title: String,
     now_playing: Option<NowPlayingState>,
     battery: f32,
     bluetooth: bool,
     headphones: bool,
     nav: NavState,
+    hover_start_time: Instant,
+    now_playing_start_time: Instant,
+    pub pingpong_scroll: bool,
 }
 
 impl App {
@@ -57,12 +63,14 @@ impl App {
             ui,
             player,
             _audio_handle: audio_handle,
-            header_title: "MyMuse".to_string(),
             now_playing: None,
             battery: 1.0,
             bluetooth: false,
             headphones: false,
             nav,
+            hover_start_time: Instant::now(),
+            now_playing_start_time: Instant::now(),
+            pingpong_scroll: true,
         }
     }
 }
@@ -119,6 +127,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if !self.nav.back() {
                         //Maybe use this to go into sleep mode or let it be a toggle in settings
                     } else {
+                        self.hover_start_time = Instant::now();
                         self.window.as_ref().unwrap().request_redraw();
                     }
                 }
@@ -130,6 +139,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some((_, idx_mut)) = self.nav.level_stack.last_mut() {
                             *idx_mut += 1;
                         }
+                        self.hover_start_time = Instant::now();
                         self.window.as_ref().unwrap().request_redraw();
                     }
                 }
@@ -140,17 +150,20 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some((_, idx_mut)) = self.nav.level_stack.last_mut() {
                             *idx_mut -= 1;
                         }
+                        self.hover_start_time = Instant::now();
                         self.window.as_ref().unwrap().request_redraw();
                     }
                 }
                 KeyCode::Enter => {
                     // Find selected
                     //
+                    self.hover_start_time = Instant::now();
+
                     if let Some(track_path) = self.nav.enter() {
                         match audio::play_track(&self.player, &track_path) {
                             Ok(info) => {
                                 println!("Playing: {}", info.title);
-
+                                self.now_playing_start_time = Instant::now();
                                 // 3. Update the UI state
 
                                 let artist = match &self.nav.current().0 {
@@ -182,6 +195,82 @@ impl ApplicationHandler<UserEvent> for App {
                     let items = self.nav.get_items();
                     let selected_index = self.nav.current().1;
 
+                    // Marquee logic
+                    let mut list_scroll = None;
+                    let mut now_scroll = None;
+
+                    // 1. List scrolling timer
+                    let hover_secs = self.hover_start_time.elapsed().as_secs_f32();
+                    if hover_secs > SCROLL_START_TIME {
+                        let scroll_time = hover_secs - SCROLL_START_TIME;
+
+                        let selected_text =
+                            items.get(selected_index).map(|s| s.as_str()).unwrap_or("");
+                        let text_w = self
+                            .ui
+                            .measure_text(selected_text, self.ui.layout.font_size_list);
+
+                        if text_w > self.ui.layout.list_item_max_width {
+                            let loop_dist = if self.pingpong_scroll {
+                                text_w - self.ui.layout.list_item_max_width
+                            } else {
+                                text_w + self.ui.layout.list_scroll_gap
+                            };
+
+                            let pause_multiplier =
+                                if self.pingpong_scroll && loop_dist < MIN_LOOP_DISTANCE {
+                                    1.0 + (1.0 - (loop_dist / MIN_LOOP_DISTANCE)) * 2.0
+                                } else {
+                                    1.0
+                                };
+                            let dynamic_pause = SCROLL_START_TIME * pause_multiplier;
+
+                            let offset = get_textloop_offset(
+                                self.pingpong_scroll,
+                                scroll_time,
+                                loop_dist,
+                                dynamic_pause,
+                            );
+                            list_scroll = Some((offset, text_w));
+                        }
+                    }
+                    // 2. Now Playing Scrolling timer
+                    let now_hover_secs = self.now_playing_start_time.elapsed().as_secs_f32();
+                    if now_hover_secs > SCROLL_START_TIME {
+                        let now_scroll_time = now_hover_secs - SCROLL_START_TIME;
+
+                        if let Some(np) = &self.now_playing {
+                            let title_w = self
+                                .ui
+                                .measure_text(&np.title, self.ui.layout.font_size_nowplay);
+
+                            if title_w > self.ui.layout.nowplay_max_width {
+                                let loop_dist = if self.pingpong_scroll {
+                                    title_w - self.ui.layout.nowplay_max_width
+                                } else {
+                                    title_w + self.ui.layout.nowplay_scroll_gap
+                                };
+
+                                let pause_multiplier =
+                                    if self.pingpong_scroll && loop_dist < MIN_LOOP_DISTANCE {
+                                        1.0 + (1.0 - (loop_dist / MIN_LOOP_DISTANCE)) * 2.0
+                                    } else {
+                                        1.0
+                                    };
+                                let dynamic_pause = SCROLL_START_TIME * pause_multiplier;
+
+                                let offset = get_textloop_offset(
+                                    self.pingpong_scroll,
+                                    now_scroll_time,
+                                    loop_dist,
+                                    dynamic_pause,
+                                );
+                                now_scroll = Some((offset, title_w));
+                            }
+                        }
+                    }
+
+                    // Now Playing Scrolling timer
                     let title = match &self.nav.current().0 {
                         Level::Root => "MyMuse".to_string(),
                         Level::Artists => "Artists".to_string(),
@@ -207,6 +296,9 @@ impl ApplicationHandler<UserEvent> for App {
                             elapsed,
                             duration: np.duration,
                         }),
+                        list_scroll,
+                        now_scroll,
+                        is_reversing: self.pingpong_scroll,
                     };
 
                     let buffer = self.ui.draw(frame);
@@ -234,5 +326,35 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
         }
+    }
+}
+
+fn get_textloop_offset(
+    pingpong_scroll: bool,
+    scroll_time: f32,
+    loop_dist: f32,
+    pause_time: f32,
+) -> f32 {
+    if pingpong_scroll {
+        let travel_time = loop_dist / SCROLL_SPEED;
+        let cycle = (travel_time + pause_time) * 2.0;
+        let t = scroll_time % cycle;
+
+        if t < travel_time {
+            // Moving right (scrolling text left)
+            t * SCROLL_SPEED
+        } else if t < travel_time + pause_time {
+            // Pause at the end
+            loop_dist
+        } else if t < travel_time * 2.0 + pause_time {
+            // Moving left (scrolling text right)
+            loop_dist - ((t - travel_time - pause_time) * SCROLL_SPEED)
+        } else {
+            // Pause at the start (waiting for the next loop)
+            0.0
+        }
+    } else {
+        // Standard looping math
+        (scroll_time * SCROLL_SPEED) % loop_dist
     }
 }

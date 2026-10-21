@@ -43,10 +43,10 @@ fn main() {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
     let proxy = event_loop.create_proxy();
 
-    // Spawn a background thread that sends a tick every 250ms
+    // Spawn a background thread that sends a tick every 16ms, giving 60fps
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(16));
             if proxy.send_event(UserEvent::Tick).is_err() {
                 break;
             }

@@ -4,12 +4,31 @@ local function fmt_time(seconds)
 	return string.format("%d:%02d", math.floor(seconds / 60), seconds % 60)
 end
 
+local CONFIG = {
+	SCREEN_W = 320,
+	SCREEN_H = 240,
+	ART_PANEL_W = 144, -- (ART_SIZE 128 + ART_PAD 8 * 2)
+	LIST_PAD_X = 6,
+	ITEM_FONT = 10,
+	NOWPLAY_TITLE_FONT = 10,
+	LIST_SCROLL_GAP = 30,
+	NOWPLAY_SCROLL_GAP = 20,
+}
+CONFIG.LIST_W = CONFIG.SCREEN_W - CONFIG.ART_PANEL_W
+CONFIG.LIST_ITEM_MAX_WIDTH = CONFIG.LIST_W - (CONFIG.LIST_PAD_X * 2)
+-- 320 (screen) - 6 (pad) - 32 (art) - 6 (pad) - 42 (approx time text width)
+CONFIG.NOWPLAY_MAX_WIDTH = CONFIG.SCREEN_W - 6 - 32 - 24
+
+function get_layout_config()
+	return CONFIG
+end
+
 function draw_screen(state)
 	local cmds = {}
 
 	-- ===== Screen =====
-	local SCREEN_W = 320
-	local SCREEN_H = 240
+	local SCREEN_W = CONFIG.SCREEN_W
+	local SCREEN_H = CONFIG.SCREEN_H
 
 	-- ===== Colors =====
 	local COLOR_BG = 0xFF222222
@@ -66,11 +85,11 @@ function draw_screen(state)
 	local ART_PAD = 8
 	local ART_PANEL_W = ART_SIZE + ART_PAD * 2
 
-	-- ===== List (Left pane)=====
+	-- ===== List (Left pane) =====
 	local LIST_X = 0
 	local LIST_W = SCREEN_W - ART_PANEL_W
-	local LIST_PAD_X = 6
-	local ITEM_FONT = 10
+	local LIST_PAD_X = CONFIG.LIST_PAD_X
+	local ITEM_FONT = CONFIG.ITEM_FONT
 	local ITEM_VPAD = 4
 	local ITEM_LINE_H = ITEM_FONT * (state.line_height_ratio or 1.0)
 	local ITEM_H = ITEM_LINE_H + ITEM_VPAD * 2
@@ -79,9 +98,14 @@ function draw_screen(state)
 	-- ===== Now playing =====
 	local NOWPLAY_PAD = 6
 	local NOWPLAY_ART = 32
-	local NOWPLAY_TITLE_FONT = 10
+	local NOWPLAY_TITLE_FONT = CONFIG.NOWPLAY_TITLE_FONT
 	local NOWPLAY_ARTIST_FONT = 8
 	local PROGRESS_H = 2
+
+	-- FADE
+	local FADE_HEIGHT = 12
+	local FADE_START_COLOR = 0x00181818
+	local FADE_END_COLOR = 0xFF181818
 
 	local selected = state.selected_index or 1
 
@@ -179,16 +203,26 @@ function draw_screen(state)
 
 	-- ===== 4. List (left pane, with scrolling) =====
 	local n = #state.items
-	local visible_rows = math.max(1, math.floor(CONTENT_H / ITEM_H))
+	local fully_visible_rows = math.max(1, math.floor(CONTENT_H / ITEM_H))
 
 	local first = 1
-	if selected > visible_rows then
-		first = selected - visible_rows + 1
+	if selected > fully_visible_rows then
+		first = selected - fully_visible_rows + 1
 	end
-	local last = math.min(n, first + visible_rows - 1)
+
+	-- Draw one extra row to enable peeking of next item
+	local last = math.min(n, first + fully_visible_rows)
 
 	for i = first, last do
 		local y = CONTENT_TOP + (i - first) * ITEM_H
+
+		-- Marquee scroll state for the selected item
+		local scroll_x = 0
+		local text_w = 0
+		if i == selected and state.list_scroll then
+			scroll_x = state.list_scroll[1]
+			text_w = state.list_scroll[2]
+		end
 
 		if i == selected then
 			table.insert(
@@ -197,19 +231,48 @@ function draw_screen(state)
 			)
 		end
 
+		local draw_x = LIST_X + LIST_PAD_X - scroll_x
 		table.insert(cmds, {
 			type = "text",
-			x = LIST_X + LIST_PAD_X,
+			x = draw_x,
 			y = y + ITEM_TEXT_PAD_Y,
 			text = state.items[i],
 			color = COLOR_ITEM_TEXT,
 			size = ITEM_FONT,
-			max_width = LIST_W - (LIST_PAD_X * 2),
+			clip_left = LIST_X + LIST_PAD_X,
+			clip_right = LIST_X + LIST_PAD_X + CONFIG.LIST_ITEM_MAX_WIDTH,
 		})
+
+		-- Second copy for looping (disabled if reversing/ping-ponging)
+		if scroll_x > 0 and not state.is_reversing then
+			table.insert(cmds, {
+				type = "text",
+				x = draw_x + text_w + CONFIG.LIST_SCROLL_GAP,
+				y = y + ITEM_TEXT_PAD_Y,
+				text = state.items[i],
+				color = COLOR_ITEM_TEXT,
+				size = ITEM_FONT,
+				clip_left = LIST_X + LIST_PAD_X,
+				clip_right = LIST_X + LIST_PAD_X + CONFIG.LIST_ITEM_MAX_WIDTH,
+			})
+		end
 	end
 
 	-- ===== 5. Now-playing bar =====
 	local np_y = CONTENT_BOTTOM
+
+	-- gradient fade to obscure peeking track from list
+
+	table.insert(cmds, {
+		type = "gradient_rect",
+		x = 0,
+		y = np_y - FADE_HEIGHT,
+		width = SCREEN_W,
+		height = FADE_HEIGHT,
+		color_start = FADE_START_COLOR,
+		color_end = FADE_END_COLOR,
+	})
+
 	table.insert(
 		cmds,
 		{ type = "rect", x = 0, y = np_y, width = SCREEN_W, height = NOWPLAY_H, color = COLOR_NOWPLAY_BG }
@@ -229,14 +292,42 @@ function draw_screen(state)
 		-- Title / artist
 		local text_x = th_x + NOWPLAY_ART + NOWPLAY_PAD
 		local title_y = np_y + NOWPLAY_PAD
+
+		-- Marquee scroll state for the now playing title
+		local now_scroll_x = 0
+		local now_text_w = 0
+		if state.now_scroll then
+			now_scroll_x = state.now_scroll[1]
+			now_text_w = state.now_scroll[2]
+		end
+
+		local draw_title_x = text_x - now_scroll_x
 		table.insert(cmds, {
 			type = "text",
-			x = text_x,
+			x = draw_title_x,
 			y = title_y,
 			text = now.title or "",
 			color = COLOR_NOWPLAY_TEXT,
 			size = NOWPLAY_TITLE_FONT,
+			clip_left = text_x,
+			clip_right = text_x + CONFIG.NOWPLAY_MAX_WIDTH,
 		})
+
+		-- Second copy for looping (disabled if reversing/ping-ponging)
+		if now_scroll_x > 0 and not state.is_reversing then
+			table.insert(cmds, {
+				type = "text",
+				x = draw_title_x + now_text_w + CONFIG.NOWPLAY_SCROLL_GAP,
+				y = title_y,
+				text = now.title or "",
+				color = COLOR_NOWPLAY_TEXT,
+				size = NOWPLAY_TITLE_FONT,
+				clip_left = text_x,
+				clip_right = text_x + CONFIG.NOWPLAY_MAX_WIDTH,
+			})
+		end
+
+		-- Artist (no scroll yet, usually fits)
 		table.insert(cmds, {
 			type = "text",
 			x = text_x,
@@ -246,7 +337,7 @@ function draw_screen(state)
 			size = NOWPLAY_ARTIST_FONT,
 		})
 
-		-- Elapsed / duration, right-aligned (approximate — see note)
+		-- Elapsed / duration, right-aligned
 		local time_str = fmt_time(now.elapsed) .. " / " .. fmt_time(now.duration)
 		local approx_w = #time_str * 5
 		table.insert(cmds, {
