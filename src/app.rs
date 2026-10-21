@@ -1,5 +1,6 @@
 // src/app.rs
 use std::num::NonZeroU32;
+use std::path::PathBuf; // <-- ADDED
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,10 +10,7 @@ use winit::{
     dpi::PhysicalSize,
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::ActiveEventLoop,
-    keyboard::{
-        KeyCode::{self, ScrollLock},
-        PhysicalKey,
-    },
+    keyboard::{KeyCode, PhysicalKey}, // <-- Removed ScrollLock
     window::Window,
 };
 
@@ -35,6 +33,9 @@ struct NowPlayingState {
     title: String,
     artist: String,
     duration: f32,
+    queue: Vec<PathBuf>,
+    queue_index: usize,
+    has_ended: bool,
 }
 
 pub struct App {
@@ -74,6 +75,32 @@ impl App {
             hover_start_time: Instant::now(),
             now_playing_start_time: Instant::now(),
             pingpong_scroll: true,
+        }
+    }
+
+    // MOVED THIS INSIDE THE IMPL BLOCK
+    fn play_track_from_queue(&mut self, path: PathBuf, queue: Vec<PathBuf>, index: usize) {
+        match audio::play_track(&self.player, &path) {
+            Ok(info) => {
+                println!("Playing: {}", info.title);
+                self.now_playing_start_time = Instant::now();
+                self.now_playing = Some(NowPlayingState {
+                    title: info.title,
+                    artist: info.artist,
+                    duration: info.duration,
+                    queue,
+                    queue_index: index,
+                    has_ended: false,
+                });
+                self.window.as_ref().unwrap().request_redraw();
+            }
+            Err(e) => {
+                eprintln!("Error playing track: {}", e);
+                // If a song fails to play, mark it as ended so we skip to the next one
+                if let Some(np) = &mut self.now_playing {
+                    np.has_ended = true;
+                }
+            }
         }
     }
 }
@@ -166,33 +193,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 KeyCode::Enter => {
-                    // Find selected
-                    //
                     self.hover_start_time = Instant::now();
 
                     if let Some(track_path) = self.nav.enter() {
-                        match audio::play_track(&self.player, &track_path) {
-                            Ok(info) => {
-                                println!("Playing: {}", info.title);
-                                self.now_playing_start_time = Instant::now();
-                                // 3. Update the UI state
-
-                                let artist = match &self.nav.current().0 {
-                                    Level::TracksOf(artist, _) => artist.clone(),
-                                    _ => "Unknown Artist".to_string(),
-                                };
-
-                                self.now_playing = Some(NowPlayingState {
-                                    title: info.title,
-                                    artist,
-                                    duration: info.duration,
-                                });
-                            }
-                            Err(e) => {
-                                eprintln!("Error playing track: {}", e);
-                            }
-                        }
+                        let queue = self.nav.get_current_playlist();
+                        // FIXED queue_iter() to queue.iter()
+                        let queue_index = queue.iter().position(|p| p == &track_path).unwrap_or(0);
+                        
+                        self.play_track_from_queue(track_path, queue, queue_index);
                     }
+                    // FIXED .unwrap to .unwrap()
                     self.window.as_ref().unwrap().request_redraw();
                 }
                 _ => {}
@@ -202,7 +212,6 @@ impl ApplicationHandler<UserEvent> for App {
                     let clock = clock_string();
                     let elapsed = self.player.get_pos().as_secs_f32();
 
-                    // Fetch data from Navstate and generate title based on curr level
                     let items = self.nav.get_items();
                     let (_, selected_index, scroll_offset) = self.nav.current().clone();
 
@@ -245,6 +254,7 @@ impl ApplicationHandler<UserEvent> for App {
                             list_scroll = Some((offset, text_w));
                         }
                     }
+                    
                     // 2. Now Playing Scrolling timer
                     let now_hover_secs = self.now_playing_start_time.elapsed().as_secs_f32();
                     if now_hover_secs > SCROLL_START_TIME {
@@ -281,7 +291,6 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
 
-                    // Now Playing Scrolling timer
                     let title = match &self.nav.current().0 {
                         Level::Root => "MyMuse".to_string(),
                         Level::Artists => "Artists".to_string(),
@@ -333,7 +342,25 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         if let UserEvent::Tick = event {
-            // Removed the `is_some()` check so the clock ticks even when paused.
+            let mut next_track = None;
+
+            // Check if the song ended
+            if let Some(np) = &mut self.now_playing {
+                if self.player.empty() && !np.has_ended {
+                    np.has_ended = true;
+                    let next_idx = np.queue_index + 1;
+
+                    if next_idx < np.queue.len() {
+                        // queue next track
+                        next_track = Some((np.queue[next_idx].clone(), np.queue.clone(), next_idx));
+                    }
+                }
+            }
+
+            if let Some((path, queue, idx)) = next_track {
+                self.play_track_from_queue(path, queue, idx);
+            }
+
             if let Some(window) = &self.window {
                 window.request_redraw();
             }

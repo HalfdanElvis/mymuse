@@ -33,6 +33,20 @@ impl NavState {
         self.level_stack.last().unwrap()
     }
 
+    pub fn get_current_playlist(&self) -> Vec<PathBuf> {
+        let (level, _, _) = self.current();
+        match level {
+            Level::TracksOf(artist, album) => self
+                .library
+                .get(artist)
+                .and_then(|a| a.get(album))
+                .cloned()
+                .unwrap_or_default(),
+            Level::AllSongs => self.get_all_songs(),
+            _ => vec![],
+        }
+    }
+
     fn get_all_albums(&self) -> Vec<(String, String)> {
         let mut albums: Vec<(String, String)> = self
             .library
