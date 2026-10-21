@@ -9,7 +9,10 @@ use winit::{
     dpi::PhysicalSize,
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::ActiveEventLoop,
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::{
+        KeyCode::{self, ScrollLock},
+        PhysicalKey,
+    },
     window::Window,
 };
 
@@ -132,23 +135,31 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 KeyCode::ArrowDown => {
-                    let (_, idx) = self.nav.current();
+                    let (_, idx, scroll) = self.nav.current();
                     let items_len = self.nav.get_items().len();
 
                     if *idx < items_len.saturating_sub(1) {
-                        if let Some((_, idx_mut)) = self.nav.level_stack.last_mut() {
+                        if let Some((_, idx_mut, scroll_mut)) = self.nav.level_stack.last_mut() {
                             *idx_mut += 1;
+                            // If selection moves past the bottom of the viewport, scroll down
+                            if *idx_mut >= *scroll_mut + self.ui.layout.visible_rows {
+                                *scroll_mut += 1;
+                            }
                         }
                         self.hover_start_time = Instant::now();
                         self.window.as_ref().unwrap().request_redraw();
                     }
                 }
                 KeyCode::ArrowUp => {
-                    let (_, idx) = self.nav.current();
+                    let (_, idx, scroll) = self.nav.current();
 
                     if *idx > 0 {
-                        if let Some((_, idx_mut)) = self.nav.level_stack.last_mut() {
+                        if let Some((_, idx_mut, scroll_mut)) = self.nav.level_stack.last_mut() {
                             *idx_mut -= 1;
+                            // If selection moves above the top of the viewport, scroll up
+                            if *idx_mut < *scroll_mut {
+                                *scroll_mut -= 1;
+                            }
                         }
                         self.hover_start_time = Instant::now();
                         self.window.as_ref().unwrap().request_redraw();
@@ -193,7 +204,7 @@ impl ApplicationHandler<UserEvent> for App {
 
                     // Fetch data from Navstate and generate title based on curr level
                     let items = self.nav.get_items();
-                    let selected_index = self.nav.current().1;
+                    let (_, selected_index, scroll_offset) = self.nav.current().clone();
 
                     // Marquee logic
                     let mut list_scroll = None;
@@ -285,6 +296,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let frame = UiFrame {
                         items: &items,
                         selected_index,
+                        scroll_offset,
                         title: &title,
                         clock: &clock,
                         battery: self.battery,

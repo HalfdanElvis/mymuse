@@ -25,6 +25,7 @@ pub struct UiFrame<'a> {
     pub list_scroll: Option<(f32, f32)>,
     pub now_scroll: Option<(f32, f32)>,
     pub is_reversing: bool,
+    pub scroll_offset: usize,
 }
 
 pub struct LayoutConfig {
@@ -34,6 +35,7 @@ pub struct LayoutConfig {
     pub nowplay_max_width: f32,
     pub list_scroll_gap: f32,
     pub nowplay_scroll_gap: f32,
+    pub visible_rows: usize,
 }
 
 pub struct UiEngine {
@@ -80,6 +82,7 @@ impl UiEngine {
             nowplay_max_width: config_table.get("NOWPLAY_MAX_WIDTH").unwrap(),
             list_scroll_gap: config_table.get("LIST_SCROLL_GAP").unwrap(),
             nowplay_scroll_gap: config_table.get("NOWPLAY_SCROLL_GAP").unwrap(),
+            visible_rows: config_table.get("VISIBLE_ROWS").unwrap(),
         };
 
         Self {
@@ -119,6 +122,7 @@ impl UiEngine {
         state.set("bluetooth", frame.bluetooth).unwrap();
         state.set("headphones", frame.headphones).unwrap();
         state.set("is_reversing", frame.is_reversing).unwrap();
+        state.set("scroll_offset", frame.scroll_offset).unwrap();
 
         if let Some(np) = frame.now {
             let table = self.lua.create_table().unwrap();

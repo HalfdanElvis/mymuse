@@ -16,20 +16,20 @@ pub enum Level {
 
 pub struct NavState {
     pub library: Library,
-    pub level_stack: Vec<(Level, usize)>, // (Current Level, selected_index)
+    pub level_stack: Vec<(Level, usize, usize)>, // (Current Level, selected_index, scroll_offset)
 }
 
 impl NavState {
     pub fn new(library: Library) -> Self {
         Self {
             library,
-            // Start at Root with index 0
-            level_stack: vec![(Level::Root, 0)],
+            // Start at Root with index and offset 0
+            level_stack: vec![(Level::Root, 0, 0)],
         }
     }
 
     // Get the current level and selected index
-    pub fn current(&self) -> &(Level, usize) {
+    pub fn current(&self) -> &(Level, usize, usize) {
         self.level_stack.last().unwrap()
     }
 
@@ -68,7 +68,7 @@ impl NavState {
 
     // Get the list of strings to display for the current level
     pub fn get_items(&self) -> Vec<String> {
-        let (level, _) = self.current();
+        let (level, _, _) = self.current();
         match level {
             Level::Root => vec![
                 "Artists".to_string(),
@@ -119,7 +119,7 @@ impl NavState {
 
     // Handle the Enter key
     pub fn enter(&mut self) -> Option<PathBuf> {
-        let (level, selected_idx) = self.current().clone();
+        let (level, selected_idx, _) = self.current().clone();
         let items = self.get_items();
 
         if items.is_empty() {
@@ -131,21 +131,21 @@ impl NavState {
         match level {
             Level::Root => {
                 match selected_item.as_str() {
-                    "Artists" => self.level_stack.push((Level::Artists, 0)),
-                    "Albums" => self.level_stack.push((Level::AllAlbums, 0)),
-                    "Songs" => self.level_stack.push((Level::AllSongs, 0)),
+                    "Artists" => self.level_stack.push((Level::Artists, 0, 0)),
+                    "Albums" => self.level_stack.push((Level::AllAlbums, 0, 0)),
+                    "Songs" => self.level_stack.push((Level::AllSongs, 0, 0)),
                     _ => {} // Settings, Albums...
                 }
                 None
             }
             Level::Artists => {
                 self.level_stack
-                    .push((Level::AlbumsOf(selected_item.clone()), 0));
+                    .push((Level::AlbumsOf(selected_item.clone()), 0, 0));
                 None
             }
             Level::AlbumsOf(artist) => {
                 self.level_stack
-                    .push((Level::TracksOf(artist, selected_item.clone()), 0));
+                    .push((Level::TracksOf(artist, selected_item.clone()), 0, 0));
                 None
             }
             Level::TracksOf(artist, album) => {
@@ -161,7 +161,7 @@ impl NavState {
                 let albums = self.get_all_albums();
                 if let Some((artist, album)) = albums.get(selected_idx) {
                     self.level_stack
-                        .push((Level::TracksOf(artist.clone(), album.clone()), 0));
+                        .push((Level::TracksOf(artist.clone(), album.clone()), 0, 0));
                 }
                 None
             }

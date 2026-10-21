@@ -13,6 +13,7 @@ local CONFIG = {
 	NOWPLAY_TITLE_FONT = 10,
 	LIST_SCROLL_GAP = 30,
 	NOWPLAY_SCROLL_GAP = 20,
+	VISIBLE_ROWS = 7,
 }
 CONFIG.LIST_W = CONFIG.SCREEN_W - CONFIG.ART_PANEL_W
 CONFIG.LIST_ITEM_MAX_WIDTH = CONFIG.LIST_W - (CONFIG.LIST_PAD_X * 2)
@@ -205,13 +206,10 @@ function draw_screen(state)
 	local n = #state.items
 	local fully_visible_rows = math.max(1, math.floor(CONTENT_H / ITEM_H))
 
-	local first = 1
-	if selected > fully_visible_rows then
-		first = selected - fully_visible_rows + 1
-	end
+	local first = state.scroll_offset + 1
 
 	-- Draw one extra row to enable peeking of next item
-	local last = math.min(n, first + fully_visible_rows)
+	local last = math.min(n, first + CONFIG.VISIBLE_ROWS)
 
 	for i = first, last do
 		local y = CONTENT_TOP + (i - first) * ITEM_H
