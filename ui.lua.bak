@@ -1,0 +1,88 @@
+-- ui.lua
+function draw_screen(state)
+	local cmds = {}
+
+	-- Screen dimensions
+	local SCREEN_W = 320
+	local SCREEN_H = 240
+
+	-- Colors
+	local COLOR_BG = 0xFF222222
+	local COLOR_HEADER_BG = 0xFF555555
+	local COLOR_HEADER_TEXT = 0xFFFFFFFF
+	local COLOR_ITEM_TEXT = 0xFFFFFFFF
+	local COLOR_SELECTED = 0xFF444444
+
+	-- Header
+	local HEADER_H = 30
+	local HEADER_PAD_X = 10
+	local HEADER_PAD_Y = 6
+	local HEADER_FONT = 16
+
+	-- List
+	local ITEM_FONT = 10
+	local ITEM_VPAD = 4
+	local LIST_PAD_X = 4
+
+	local ITEM_LINE_HEIGHT = ITEM_FONT * (state.line_height_ratio or 1.0)
+	local ITEM_HEIGHT = ITEM_LINE_HEIGHT + ITEM_VPAD * 2
+	local ITEM_TEXT_PAD_Y = ITEM_VPAD
+	-- Vertical offset from row top to text top (centers the glyph line in the row)
+	local LIST_TOP = HEADER_H -- was the literal 40
+
+	-- 1. Background
+	table.insert(cmds, { type = "rect", x = 0, y = 0, width = SCREEN_W, height = SCREEN_H, color = COLOR_BG })
+
+	-- 2. Header Bar
+	table.insert(cmds, {
+		type = "rect",
+		x = 0,
+		y = 0,
+		width = SCREEN_W,
+		height = HEADER_H,
+		color = COLOR_HEADER_BG,
+	})
+	table.insert(cmds, {
+		type = "text",
+		x = HEADER_PAD_X,
+		y = HEADER_PAD_Y,
+		text = "Music Library",
+		color = COLOR_HEADER_TEXT,
+		size = HEADER_FONT,
+	})
+
+	-- 3. Dynamic List (with scrolling)
+	local list_h = SCREEN_H - LIST_TOP
+	local visible_rows = math.floor(list_h / ITEM_HEIGHT)
+	local n = #state.items
+	local selected = state.selected_index -- 1-based
+
+	-- Clamp the scroll window so the selected item is always visible
+	local first = 1
+	if selected > visible_rows then
+		first = selected - visible_rows + 1
+	end
+	local last = math.min(n, first + visible_rows - 1)
+
+	for i = first, last do
+		local y = LIST_TOP + (i - first) * ITEM_HEIGHT
+
+		if i == selected then
+			table.insert(
+				cmds,
+				{ type = "rect", x = 0, y = y, width = SCREEN_W, height = ITEM_HEIGHT, color = COLOR_SELECTED }
+			)
+		end
+
+		table.insert(cmds, {
+			type = "text",
+			x = LIST_PAD_X,
+			y = y + ITEM_TEXT_PAD_Y,
+			text = state.items[i],
+			color = COLOR_ITEM_TEXT,
+			size = ITEM_FONT,
+		})
+	end
+
+	return cmds
+end

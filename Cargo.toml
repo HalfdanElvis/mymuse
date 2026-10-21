@@ -8,6 +8,7 @@ rodio = { version = "0.23", features = ["symphonia-all"] }
 walkdir = "2.5"
 lofty = "0.25.4"
 mlua = {version = "0.12.2", features = ["lua54", "vendored"]}
-minifb = "0.29"
 tiny-skia = "0.12"
 fontdue = "0.9.5"
+winit = "0.30"
+softbuffer = "0.4"
