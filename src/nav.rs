@@ -1,4 +1,4 @@
-use crate::library::Library;
+use crate::library::{Library, Track};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15,6 +15,9 @@ pub struct NavState {
     pub library: Library,
     // (Current Level, selected_index, scroll_offset)
     pub level_stack: Vec<(Level, usize, usize)>,
+    // Flattened song list, rebuilt on entry into AllSongs. Read-only while
+    // inside the level so get_items() never re-sorts.
+    all_songs_cache: Vec<Track>,
 }
 
 impl NavState {
@@ -22,6 +25,7 @@ impl NavState {
         Self {
             library,
             level_stack: vec![(Level::Root, 0, 0)],
+            all_songs_cache: Vec::new(),
         }
     }
 
@@ -37,9 +41,9 @@ impl NavState {
                 .library
                 .get(artist)
                 .and_then(|a| a.get(album))
-                .cloned()
+                .map(|tracks| tracks.iter().map(|t| t.path.clone()).collect())
                 .unwrap_or_default(),
-            Level::AllSongs => self.get_all_songs(),
+            Level::AllSongs => self.all_songs().iter().map(|t| t.path.clone()).collect(),
             _ => vec![],
         }
     }
@@ -58,19 +62,21 @@ impl NavState {
         albums
     }
 
-    fn get_all_songs(&self) -> Vec<PathBuf> {
-        let mut songs: Vec<PathBuf> = self
+    fn all_songs(&self) -> &[Track] {
+        &self.all_songs_cache
+    }
+
+    /// Flatten every track into one vector sorted by display title.
+    /// Called once per entry into the Songs level, never per frame.
+    fn rebuild_all_songs_cache(&mut self) {
+        let mut songs: Vec<Track> = self
             .library
             .values()
             .flat_map(|albums_map| albums_map.values())
             .flat_map(|tracks| tracks.iter().cloned())
             .collect();
-        songs.sort_by(|a, b| {
-            let a_name = a.file_stem().unwrap_or_default().to_string_lossy();
-            let b_name = b.file_stem().unwrap_or_default().to_string_lossy();
-            a_name.cmp(&b_name)
-        });
-        songs
+        songs.sort_by(|a, b| a.title.cmp(&b.title));
+        self.all_songs_cache = songs;
     }
 
     // --- Display items ---------------------------------------------------
@@ -109,7 +115,7 @@ impl NavState {
         self.library
             .get(artist)
             .and_then(|albums| albums.get(album))
-            .map(|tracks| tracks.iter().map(track_display_name).collect())
+            .map(|tracks| tracks.iter().map(|t| t.title.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -121,10 +127,7 @@ impl NavState {
     }
 
     fn all_song_items(&self) -> Vec<String> {
-        self.get_all_songs()
-            .into_iter()
-            .map(|p| track_display_name(&p))
-            .collect()
+        self.all_songs().iter().map(|t| t.title.clone()).collect()
     }
 
     // --- Navigation ------------------------------------------------------
@@ -156,7 +159,7 @@ impl NavState {
                 self.enter_all_album(selected_idx);
                 None
             }
-            Level::AllSongs => self.get_all_songs().get(selected_idx).cloned(),
+            Level::AllSongs => self.all_songs().get(selected_idx).map(|t| t.path.clone()),
         }
     }
 
@@ -164,7 +167,11 @@ impl NavState {
         match selected {
             "Artists" => self.level_stack.push((Level::Artists, 0, 0)),
             "Albums" => self.level_stack.push((Level::AllAlbums, 0, 0)),
-            "Songs" => self.level_stack.push((Level::AllSongs, 0, 0)),
+            "Songs" => {
+                // Only place the flattened song list is (re)built.
+                self.rebuild_all_songs_cache();
+                self.level_stack.push((Level::AllSongs, 0, 0));
+            }
             _ => {} // Settings not implemented
         }
     }
@@ -181,7 +188,7 @@ impl NavState {
             .get(artist)
             .and_then(|a| a.get(album))
             .and_then(|tracks| tracks.get(idx))
-            .cloned()
+            .map(|t| t.path.clone())
     }
 
     pub fn back(&mut self) -> bool {
@@ -192,11 +199,4 @@ impl NavState {
             false
         }
     }
-}
-
-fn track_display_name(path: &PathBuf) -> String {
-    path.file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string()
 }

@@ -1,13 +1,21 @@
 use lofty::prelude::*;
 use lofty::read_from_path;
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-// Data structures
-pub type Tracklist = Vec<PathBuf>;
-pub type ArtistMap = BTreeMap<String, Tracklist>; // Album name + songs
-pub type Library = BTreeMap<String, ArtistMap>; // Artist name + (Artists (album name + songs)
+#[derive(Debug, Clone)]
+pub struct Track {
+    pub path: PathBuf,
+    pub title: String,
+}
+
+pub type Tracklist = Vec<Track>;
+pub type ArtistMap = BTreeMap<String, Tracklist>;
+pub type Library = BTreeMap<String, ArtistMap>;
+
+const UNKNOWN_ARTIST: &str = "Unknown Artist";
+const UNKNOWN_ALBUM: &str = "Unknown Album";
 
 const HANDLED_EXTENSIONS: [&str; 10] = [
     "wav", "au", "dsd", "flac", "mp3", "m4a", "m4b", "ogg", "oga", "opus",
@@ -15,66 +23,152 @@ const HANDLED_EXTENSIONS: [&str; 10] = [
 
 pub fn scan_and_build_library(path: &str) -> Library {
     let mut library: Library = BTreeMap::new();
+    // Track numbers are captured during the one-and-only tag read so we
+    // can sort albums without re-reading every file at the end.
+    let mut track_nums: HashMap<PathBuf, u32> = HashMap::new();
 
     for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            let path_buf = entry.path().to_path_buf();
-            if let Some(ext) = path_buf.extension().and_then(|e| e.to_str()) {
-                let ext = ext.to_lowercase();
-                if HANDLED_EXTENSIONS.contains(&ext.as_str()) {
-                    read_metadata(&mut library, path_buf);
-                }
-            }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path_buf = entry.path().to_path_buf();
+        let Some(ext) = path_buf.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !HANDLED_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+            continue;
+        }
+
+        let meta = extract_metadata(&path_buf);
+        track_nums.insert(path_buf.clone(), meta.track_num);
+        insert_track(&mut library, meta, path_buf);
+    }
+
+    // Sort each album by (track number, path). Path is a stable tiebreaker
+    // for untagged / duplicate-numbered files.
+    for albums in library.values_mut() {
+        for tracks in albums.values_mut() {
+            tracks.sort_by(|a, b| {
+                let ta = track_nums.get(&a.path).copied().unwrap_or(u32::MAX);
+                let tb = track_nums.get(&b.path).copied().unwrap_or(u32::MAX);
+                ta.cmp(&tb).then_with(|| a.path.cmp(&b.path))
+            });
         }
     }
+
     library
 }
 
-fn read_metadata(library: &mut Library, path: PathBuf) {
-    let tagged_file = match read_from_path(&path) {
-        Ok(f) => f,
-        Err(_) => {
-            // if no tags put in "Unkown Artist/Unkown Album"
-            insert_track(
-                library,
-                "Unknown Artist".to_string(),
-                "Unknown Album".to_string(),
-                path,
-            );
-            return;
-        }
-    };
-    let tag = match tagged_file.primary_tag() {
-        Some(primary_tag) => primary_tag,
-        None => {
-            insert_track(
-                library,
-                "Uknown Artist".to_string(),
-                "Unkown Album".to_string(),
-                path,
-            );
-            return;
-        }
-    };
-
-    // if we find metadata, extract and instert:
-    let artist = tag
-        .artist()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "Unknown Artist".to_string());
-    let album = tag
-        .album()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "Unknown Album".to_string());
-
-    insert_track(library, artist, album, path);
+struct TrackMeta {
+    artist: String,
+    album: String,
+    title: String,
+    track_num: u32,
 }
 
-fn insert_track(library: &mut Library, artist: String, album: String, path: PathBuf) {
+fn extract_metadata(path: &Path) -> TrackMeta {
+    let fallback_title = title_from_filename(path);
+    let fallback_track = track_from_filename(path);
+
+    let unknown = || TrackMeta {
+        artist: UNKNOWN_ARTIST.into(),
+        album: UNKNOWN_ALBUM.into(),
+        title: fallback_title.clone(),
+        track_num: fallback_track,
+    };
+
+    let Ok(tagged_file) = read_from_path(path) else {
+        return unknown();
+    };
+    let Some(tag) = tagged_file.primary_tag() else {
+        return unknown();
+    };
+
+    TrackMeta {
+        artist: tag
+            .artist()
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| UNKNOWN_ARTIST.to_string()),
+        album: tag
+            .album()
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| UNKNOWN_ALBUM.to_string()),
+        title: tag
+            .title()
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(fallback_title),
+        track_num: tag.track().unwrap_or(fallback_track),
+    }
+}
+
+fn insert_track(library: &mut Library, meta: TrackMeta, path: PathBuf) {
     library
-        .entry(artist)
+        .entry(meta.artist)
         .or_default()
-        .entry(album)
+        .entry(meta.album)
         .or_default()
-        .push(path);
+        .push(Track {
+            path,
+            title: meta.title,
+        });
+}
+
+/// Filename fallback for display title: strips leading track number.
+fn title_from_filename(path: &Path) -> String {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    strip_track_prefix(&stem).to_string()
+}
+
+/// Filename fallback for sort order: first digit run, if any.
+fn track_from_filename(path: &Path) -> u32 {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return u32::MAX;
+    };
+    let digits: String = stem
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().unwrap_or(u32::MAX)
+}
+
+/// Strips a leading track number from a filename stem:
+///   "01 - Song"      -> "Song"
+///   "01. Song"       -> "Song"
+///   "01_Song"        -> "Song"
+///   "[01] Song"      -> "Song"
+///   "(01) - Song"    -> "Song"
+///   "No Number"      -> "No Number"
+fn strip_track_prefix(s: &str) -> &str {
+    let original = s;
+    let mut s = s.trim_start();
+
+    if let Some(rest) = s.strip_prefix('[') {
+        match rest.find(']') {
+            Some(i) => s = &rest[i + 1..],
+            None => return original,
+        }
+    } else if let Some(rest) = s.strip_prefix('(') {
+        match rest.find(')') {
+            Some(i) => s = &rest[i + 1..],
+            None => return original,
+        }
+    } else {
+        let n = s.chars().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 {
+            return original;
+        }
+        s = &s[n..];
+    }
+
+    s = s.trim_start_matches(|c: char| c.is_whitespace() || c == '-' || c == '_' || c == '.');
+
+    if s.is_empty() {
+        original
+    } else {
+        s
+    }
 }
