@@ -1,5 +1,5 @@
 use crate::library::{Library, Track};
-use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Level {
@@ -13,42 +13,115 @@ pub enum Level {
 
 pub struct NavState {
     pub library: Library,
-    // (Current Level, selected_index, scroll_offset)
     pub level_stack: Vec<(Level, usize, usize)>,
-    // Flattened song list, rebuilt on entry into AllSongs. Read-only while
-    // inside the level so get_items() never re-sorts.
+
+    all_albums_list: Vec<(String, String)>,
     all_songs_cache: Vec<Track>,
+    items_cache: Vec<String>,
 }
 
 impl NavState {
     pub fn new(library: Library) -> Self {
-        Self {
+        let mut state = Self {
             library,
             level_stack: vec![(Level::Root, 0, 0)],
+            all_albums_list: Vec::new(),
             all_songs_cache: Vec::new(),
-        }
+            items_cache: Vec::new(),
+        };
+        state.rebuild_all_albums_list();
+        state.rebuild_items_cache();
+        state
     }
 
     pub fn current(&self) -> &(Level, usize, usize) {
         self.level_stack.last().unwrap()
     }
 
-    // --- Playlist / item resolution --------------------------------------
+    // --- Album art context ----------------------------------------------
 
-    pub fn get_current_playlist(&self) -> Vec<PathBuf> {
+    pub fn current_album_context(&self) -> Option<(String, String)> {
+        let (level, idx, _) = self.current();
+        match level {
+            Level::AlbumsOf(artist) => self
+                .library
+                .get(artist)
+                .and_then(|a| a.keys().nth(*idx))
+                .map(|album| (artist.clone(), album.clone())),
+            Level::TracksOf(artist, album) => Some((artist.clone(), album.clone())),
+            Level::AllAlbums => self.all_albums_list.get(*idx).cloned(),
+            Level::AllSongs => self
+                .all_songs_cache
+                .get(*idx)
+                .map(|t| (t.artist.clone(), t.album.clone())),
+            Level::Root | Level::Artists => None,
+        }
+    }
+
+    pub fn get_album_art_bytes(&self, artist: &str, album: &str) -> Option<Arc<Vec<u8>>> {
+        self.library.get(artist)?.get(album)?.art_bytes.clone()
+    }
+
+    /// Sorted, cached list of every (artist, album). Used by the slideshow.
+    pub fn all_albums(&self) -> &[(String, String)] {
+        &self.all_albums_list
+    }
+
+    // --- Playlist resolution --------------------------------------------
+
+    pub fn get_current_playlist(&self) -> Vec<Track> {
         match &self.current().0 {
             Level::TracksOf(artist, album) => self
                 .library
                 .get(artist)
                 .and_then(|a| a.get(album))
-                .map(|tracks| tracks.iter().map(|t| t.path.clone()).collect())
+                .map(|al| al.tracks.clone())
                 .unwrap_or_default(),
-            Level::AllSongs => self.all_songs().iter().map(|t| t.path.clone()).collect(),
+            Level::AllSongs => self.all_songs_cache.clone(),
             _ => vec![],
         }
     }
 
-    fn get_all_albums(&self) -> Vec<(String, String)> {
+    // --- Display items --------------------------------------------------
+
+    /// Cached display strings for the current level. O(1).
+    pub fn get_items(&self) -> &[String] {
+        &self.items_cache
+    }
+
+    fn rebuild_items_cache(&mut self) {
+        let (level, _, _) = self.current();
+        self.items_cache = match level {
+            Level::Root => ["Artists", "Albums", "Songs", "Settings"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            Level::Artists => self.library.keys().cloned().collect(),
+            Level::AlbumsOf(artist) => self
+                .library
+                .get(artist)
+                .map(|a| a.keys().cloned().collect())
+                .unwrap_or_default(),
+            Level::TracksOf(artist, album) => self
+                .library
+                .get(artist)
+                .and_then(|a| a.get(album))
+                .map(|al| al.tracks.iter().map(|t| t.title.clone()).collect())
+                .unwrap_or_default(),
+            Level::AllAlbums => self
+                .all_albums_list
+                .iter()
+                .map(|(_, album)| album.clone())
+                .collect(),
+            Level::AllSongs => self
+                .all_songs_cache
+                .iter()
+                .map(|t| t.title.clone())
+                .collect(),
+        };
+    }
+
+    fn rebuild_all_albums_list(&mut self) {
         let mut albums: Vec<(String, String)> = self
             .library
             .iter()
@@ -59,107 +132,58 @@ impl NavState {
             })
             .collect();
         albums.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        albums
+        self.all_albums_list = albums;
     }
 
-    fn all_songs(&self) -> &[Track] {
-        &self.all_songs_cache
-    }
-
-    /// Flatten every track into one vector sorted by display title.
-    /// Called once per entry into the Songs level, never per frame.
     fn rebuild_all_songs_cache(&mut self) {
         let mut songs: Vec<Track> = self
             .library
             .values()
             .flat_map(|albums_map| albums_map.values())
-            .flat_map(|tracks| tracks.iter().cloned())
+            .flat_map(|al| al.tracks.iter().cloned())
             .collect();
         songs.sort_by(|a, b| a.title.cmp(&b.title));
         self.all_songs_cache = songs;
     }
 
-    // --- Display items ---------------------------------------------------
+    // --- Navigation -----------------------------------------------------
 
-    pub fn get_items(&self) -> Vec<String> {
-        let (level, _, _) = self.current();
-        match level {
-            Level::Root => Self::root_items(),
-            Level::Artists => self.artist_items(),
-            Level::AlbumsOf(artist) => self.album_items(artist),
-            Level::TracksOf(artist, album) => self.track_items(artist, album),
-            Level::AllAlbums => self.all_album_items(),
-            Level::AllSongs => self.all_song_items(),
-        }
-    }
-
-    fn root_items() -> Vec<String> {
-        ["Artists", "Albums", "Songs", "Settings"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    }
-
-    fn artist_items(&self) -> Vec<String> {
-        self.library.keys().cloned().collect()
-    }
-
-    fn album_items(&self, artist: &str) -> Vec<String> {
-        self.library
-            .get(artist)
-            .map(|albums| albums.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    fn track_items(&self, artist: &str, album: &str) -> Vec<String> {
-        self.library
-            .get(artist)
-            .and_then(|albums| albums.get(album))
-            .map(|tracks| tracks.iter().map(|t| t.title.clone()).collect())
-            .unwrap_or_default()
-    }
-
-    fn all_album_items(&self) -> Vec<String> {
-        self.get_all_albums()
-            .into_iter()
-            .map(|(_, album)| album)
-            .collect()
-    }
-
-    fn all_song_items(&self) -> Vec<String> {
-        self.all_songs().iter().map(|t| t.title.clone()).collect()
-    }
-
-    // --- Navigation ------------------------------------------------------
-
-    pub fn enter(&mut self) -> Option<PathBuf> {
+    /// Returns `Some(index_into_current_playlist)` when the caller should
+    /// start playback; `None` when this was a menu drill-down.
+    pub fn enter(&mut self) -> Option<usize> {
         let (level, selected_idx, _) = self.current().clone();
-        let items = self.get_items();
-        if items.is_empty() {
+        if self.items_cache.is_empty() {
             return None;
         }
-        let selected = items[selected_idx].clone();
+        let selected = self.items_cache[selected_idx].clone();
 
-        match level {
+        let play = match level {
             Level::Root => {
                 self.enter_root(&selected);
-                None
+                false
             }
             Level::Artists => {
                 self.level_stack.push((Level::AlbumsOf(selected), 0, 0));
-                None
+                false
             }
             Level::AlbumsOf(artist) => {
                 self.level_stack
                     .push((Level::TracksOf(artist, selected), 0, 0));
-                None
+                false
             }
-            Level::TracksOf(artist, album) => self.track_at(&artist, &album, selected_idx),
+            Level::TracksOf(_, _) => true,
             Level::AllAlbums => {
                 self.enter_all_album(selected_idx);
-                None
+                false
             }
-            Level::AllSongs => self.all_songs().get(selected_idx).map(|t| t.path.clone()),
+            Level::AllSongs => true,
+        };
+
+        if play {
+            Some(selected_idx)
+        } else {
+            self.rebuild_items_cache();
+            None
         }
     }
 
@@ -168,35 +192,35 @@ impl NavState {
             "Artists" => self.level_stack.push((Level::Artists, 0, 0)),
             "Albums" => self.level_stack.push((Level::AllAlbums, 0, 0)),
             "Songs" => {
-                // Only place the flattened song list is (re)built.
                 self.rebuild_all_songs_cache();
                 self.level_stack.push((Level::AllSongs, 0, 0));
             }
-            _ => {} // Settings not implemented
+            _ => {} // Settings
         }
     }
 
     fn enter_all_album(&mut self, idx: usize) {
-        if let Some((artist, album)) = self.get_all_albums().get(idx) {
+        if let Some((artist, album)) = self.all_albums_list.get(idx) {
             self.level_stack
                 .push((Level::TracksOf(artist.clone(), album.clone()), 0, 0));
         }
     }
 
-    fn track_at(&self, artist: &str, album: &str, idx: usize) -> Option<PathBuf> {
-        self.library
-            .get(artist)
-            .and_then(|a| a.get(album))
-            .and_then(|tracks| tracks.get(idx))
-            .map(|t| t.path.clone())
-    }
-
     pub fn back(&mut self) -> bool {
         if self.level_stack.len() > 1 {
             self.level_stack.pop();
+            self.rebuild_items_cache();
             true
         } else {
             false
         }
+    }
+
+    pub fn hovered_artist(&self) -> Option<String> {
+        if !matches!(self.current().0, Level::Artists) {
+            return None;
+        }
+        let (_, idx, _) = self.current();
+        self.items_cache.get(*idx).cloned()
     }
 }

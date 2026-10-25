@@ -1,6 +1,6 @@
 use lofty::prelude::*;
 use lofty::read_from_path;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -8,6 +8,8 @@ use walkdir::WalkDir;
 pub struct Track {
     pub path: PathBuf,
     pub title: String,
+    // Only meaningful at scan time for album sorting. Not displayed.
+    pub(crate) track_num: u32,
 }
 
 pub type Tracklist = Vec<Track>;
@@ -23,9 +25,6 @@ const HANDLED_EXTENSIONS: [&str; 10] = [
 
 pub fn scan_and_build_library(path: &str) -> Library {
     let mut library: Library = BTreeMap::new();
-    // Track numbers are captured during the one-and-only tag read so we
-    // can sort albums without re-reading every file at the end.
-    let mut track_nums: HashMap<PathBuf, u32> = HashMap::new();
 
     for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
@@ -38,20 +37,18 @@ pub fn scan_and_build_library(path: &str) -> Library {
         if !HANDLED_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
             continue;
         }
-
         let meta = extract_metadata(&path_buf);
-        track_nums.insert(path_buf.clone(), meta.track_num);
         insert_track(&mut library, meta, path_buf);
     }
 
-    // Sort each album by (track number, path). Path is a stable tiebreaker
-    // for untagged / duplicate-numbered files.
+    // Sort each album by ID3 track number; untagged tracks fall to the end
+    // sorted alphabetically by path.
     for albums in library.values_mut() {
         for tracks in albums.values_mut() {
             tracks.sort_by(|a, b| {
-                let ta = track_nums.get(&a.path).copied().unwrap_or(u32::MAX);
-                let tb = track_nums.get(&b.path).copied().unwrap_or(u32::MAX);
-                ta.cmp(&tb).then_with(|| a.path.cmp(&b.path))
+                a.track_num
+                    .cmp(&b.track_num)
+                    .then_with(|| a.path.cmp(&b.path))
             });
         }
     }
@@ -67,14 +64,17 @@ struct TrackMeta {
 }
 
 fn extract_metadata(path: &Path) -> TrackMeta {
-    let fallback_title = title_from_filename(path);
-    let fallback_track = track_from_filename(path);
+    // Filename stem is the display fallback — verbatim, no stripping.
+    let fallback_title = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Unknown".to_string());
 
     let unknown = || TrackMeta {
         artist: UNKNOWN_ARTIST.into(),
         album: UNKNOWN_ALBUM.into(),
         title: fallback_title.clone(),
-        track_num: fallback_track,
+        track_num: u32::MAX,
     };
 
     let Ok(tagged_file) = read_from_path(path) else {
@@ -100,7 +100,7 @@ fn extract_metadata(path: &Path) -> TrackMeta {
             .map(|s| s.to_string())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(fallback_title),
-        track_num: tag.track().unwrap_or(fallback_track),
+        track_num: tag.track().unwrap_or(u32::MAX),
     }
 }
 
@@ -113,62 +113,6 @@ fn insert_track(library: &mut Library, meta: TrackMeta, path: PathBuf) {
         .push(Track {
             path,
             title: meta.title,
+            track_num: meta.track_num,
         });
-}
-
-/// Filename fallback for display title: strips leading track number.
-fn title_from_filename(path: &Path) -> String {
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    strip_track_prefix(&stem).to_string()
-}
-
-/// Filename fallback for sort order: first digit run, if any.
-fn track_from_filename(path: &Path) -> u32 {
-    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-        return u32::MAX;
-    };
-    let digits: String = stem
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().unwrap_or(u32::MAX)
-}
-
-/// Strips a leading track number from a filename stem:
-///   "01 - Song"      -> "Song"
-///   "01. Song"       -> "Song"
-///   "01_Song"        -> "Song"
-///   "[01] Song"      -> "Song"
-///   "(01) - Song"    -> "Song"
-///   "No Number"      -> "No Number"
-fn strip_track_prefix(s: &str) -> &str {
-    let original = s;
-    let mut s = s.trim_start();
-
-    if let Some(rest) = s.strip_prefix('[') {
-        match rest.find(']') {
-            Some(i) => s = &rest[i + 1..],
-            None => return original,
-        }
-    } else if let Some(rest) = s.strip_prefix('(') {
-        match rest.find(')') {
-            Some(i) => s = &rest[i + 1..],
-            None => return original,
-        }
-    } else {
-        let n = s.chars().take_while(|c| c.is_ascii_digit()).count();
-        if n == 0 {
-            return original;
-        }
-        s = &s[n..];
-    }
-
-    s = s.trim_start_matches(|c: char| c.is_whitespace() || c == '-' || c == '_' || c == '.');
-
-    if s.is_empty() {
-        original
-    } else {
-        s
-    }
 }

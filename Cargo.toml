@@ -12,3 +12,5 @@ tiny-skia = "0.12"
 fontdue = "0.9.5"
 winit = "0.30"
 softbuffer = "0.4"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"]}
+rayon = "1"

@@ -51,11 +51,9 @@ pub struct UiEngine {
 
 impl UiEngine {
     pub fn new(width: usize, height: usize) -> Self {
-        // 1. Setup Pixmap and buffer
         let pixmap = Pixmap::new(width as u32, height as u32).unwrap();
         let buffer = vec![0; width * height];
 
-        // 2. Load font
         let font_data = fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
             .expect("Could not find font file");
         let font =
@@ -66,12 +64,10 @@ impl UiEngine {
             .map(|m| (m.ascent - m.descent) / 16.0)
             .unwrap_or(1.16);
 
-        // 3. Setup Lua
         let lua = Lua::new();
         let script = fs::read_to_string("ui.lua").expect("Could not find ui.lua");
         lua.load(&script).exec().expect("Failed to run Lua script");
 
-        // 4. Read layout config from Lua
         let config_fn: mlua::Function = lua.globals().get("get_layout_config").unwrap();
         let config_table: mlua::Table = config_fn.call(()).unwrap();
 
@@ -97,22 +93,33 @@ impl UiEngine {
         }
     }
 
-    // Returns a slice of the pixel buffer. No windowing logic here!
     pub fn draw(&mut self, frame: UiFrame) -> &[u32] {
         self.pixmap.fill(Color::from_rgba8(0, 0, 0, 255));
 
-        // 1. Convert Rust items to Lua Table
+        let state = self.build_state_table(frame);
+
+        let draw_fn: mlua::Function = self.lua.globals().get("draw_screen").unwrap();
+        let draw_cmds: Table = draw_fn.call(state).unwrap();
+
+        for cmd in draw_cmds.sequence_values::<Table>() {
+            self.execute_command(&cmd.unwrap());
+        }
+
+        self.pixmap_to_buffer();
+        &self.buffer
+    }
+
+    fn build_state_table(&self, frame: UiFrame) -> Table {
         let lua_items = self.lua.create_table().unwrap();
         for (i, item) in frame.items.iter().enumerate() {
             lua_items.set(i + 1, item.clone()).unwrap();
         }
 
-        // 2. Create the State Table
         let state = self.lua.create_table().unwrap();
         state.set("items", lua_items).unwrap();
         state
             .set("selected_index", frame.selected_index + 1)
-            .unwrap(); // 1-based for ui.lua
+            .unwrap();
         state
             .set("line_height_ratio", self.line_ratio as f64)
             .unwrap();
@@ -147,34 +154,29 @@ impl UiEngine {
             state.set("now_scroll", t).unwrap();
         }
 
-        // 3. Call Lua draw_screen
-        let draw_fn: mlua::Function = self.lua.globals().get("draw_screen").unwrap();
-        let draw_cmds: Table = draw_fn.call(state).unwrap();
+        state
+    }
 
-        // 4. Parse commands
-        for cmd in draw_cmds.sequence_values::<Table>() {
-            let cmd = cmd.unwrap();
-            let cmd_type: String = cmd.get("type").unwrap();
-
-            if cmd_type == "rect" {
-                self.draw_rect(&cmd);
-            } else if cmd_type == "gradient_rect" {
-                self.draw_gradient_rect(&cmd);
-            } else if cmd_type == "text" {
-                self.draw_text(&cmd);
-            }
+    fn execute_command(&mut self, cmd: &Table) {
+        let cmd_type: String = cmd.get("type").unwrap();
+        match cmd_type.as_str() {
+            "rect" => self.draw_rect(cmd),
+            "gradient_rect" => self.draw_gradient_rect(cmd),
+            "text" => self.draw_text(cmd),
+            _ => {}
         }
+    }
 
-        // 5. Copy Pixmap to Buffer
+    fn pixmap_to_buffer(&mut self) {
         for (i, pixel) in self.pixmap.pixels().iter().enumerate() {
             let r = pixel.red() as u32;
             let g = pixel.green() as u32;
             let b = pixel.blue() as u32;
             self.buffer[i] = (r << 16) | (g << 8) | b;
         }
-
-        &self.buffer
     }
+
+    // --- Primitive drawing ----------------------------------------------
 
     fn draw_rect(&mut self, cmd: &Table) {
         let x: f32 = cmd.get("x").unwrap();
@@ -264,7 +266,6 @@ impl UiEngine {
         let g = ((color_hex >> 8) & 0xFF) as u8;
         let b = (color_hex & 0xFF) as u8;
 
-        // Color parsing and Baselin calculation
         let ascent = self
             .font
             .horizontal_line_metrics(size)
@@ -279,7 +280,6 @@ impl UiEngine {
 
         let mut pen_x = x;
         for c in text.chars() {
-            // Stop rendering if we hit the absolute right edge
             if pen_x >= right_limit as f32 {
                 break;
             }

@@ -199,8 +199,37 @@ function draw_screen(state)
 		height = ART_SIZE + 4,
 		color = COLOR_ART_FRAME,
 	})
-	table.insert(cmds, { type = "rect", x = art_x, y = art_y, width = ART_SIZE, height = ART_SIZE, color = art_color })
-	-- TODO: replace the rect above with a real image command once Rust can decode album art.
+	if state.has_pane_art then
+		-- Black backing so the slideshow fade-in blends from black, not the
+		-- placeholder color bleeding through. Rust applies the fade via
+		-- pane_art_alpha (base alpha); we don't need to pass `alpha` here.
+		table.insert(cmds, {
+			type = "rect",
+			x = art_x,
+			y = art_y,
+			width = ART_SIZE,
+			height = ART_SIZE,
+			color = 0xFF000000,
+		})
+		table.insert(cmds, {
+			type = "album_art",
+			x = art_x,
+			y = art_y,
+			width = ART_SIZE,
+			height = ART_SIZE,
+		})
+	else
+		-- No art (album has no embedded cover, or we're on a level without a
+		-- single album context): show the colored placeholder as before.
+		table.insert(cmds, {
+			type = "rect",
+			x = art_x,
+			y = art_y,
+			width = ART_SIZE,
+			height = ART_SIZE,
+			color = art_color,
+		})
+	end
 
 	-- ===== 4. List (left pane, with scrolling) =====
 	local n = #state.items
@@ -279,14 +308,29 @@ function draw_screen(state)
 	if state.now then
 		local now = state.now
 
-		-- Album art thumbnail (placeholder until real images exist)
+		-- Album art thumbnail
 		local th_x = NOWPLAY_PAD
 		local th_y = np_y + math.floor((NOWPLAY_H - PROGRESS_H - NOWPLAY_ART) / 2)
-		table.insert(
-			cmds,
-			{ type = "rect", x = th_x, y = th_y, width = NOWPLAY_ART, height = NOWPLAY_ART, color = COLOR_ART_FRAME }
-		)
-
+		if state.has_now_art then
+			table.insert(cmds, {
+				type = "now_art_thumb",
+				x = th_x,
+				y = th_y,
+				width = NOWPLAY_ART,
+				height = NOWPLAY_ART,
+			})
+		else
+			table.insert(cmds, {
+				type = "rect",
+				x = th_x,
+				y = th_y,
+				width = NOWPLAY_ART,
+				height = NOWPLAY_ART,
+				color = COLOR_ART_FRAME,
+			})
+		end
+		--
+		--
 		-- Title / artist
 		local text_x = th_x + NOWPLAY_ART + NOWPLAY_PAD
 		local title_y = np_y + NOWPLAY_PAD

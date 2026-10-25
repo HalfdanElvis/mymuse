@@ -1,19 +1,35 @@
-use lofty::prelude::*;
-use lofty::read_from_path;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use lofty::prelude::*;
+use lofty::read_from_path;
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
 pub struct Track {
     pub path: PathBuf,
     pub title: String,
-    // Only meaningful at scan time for album sorting. Not displayed.
-    pub(crate) track_num: u32,
+    pub artist: String,
+    pub album: String,
+    pub track_num: u32,
 }
 
-pub type Tracklist = Vec<Track>;
-pub type ArtistMap = BTreeMap<String, Tracklist>;
+#[derive(Debug, Clone)]
+pub struct AlbumArt {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<[u8; 4]>,
+}
+
+pub struct Album {
+    pub tracks: Vec<Track>,
+    /// Encoded JPEG/PNG/WebP bytes, shared across all tracks of the album.
+    /// Decoded lazily so scan-time memory stays small.
+    pub art_bytes: Option<Arc<Vec<u8>>>,
+}
+
+pub type ArtistMap = BTreeMap<String, Album>;
 pub type Library = BTreeMap<String, ArtistMap>;
 
 const UNKNOWN_ARTIST: &str = "Unknown Artist";
@@ -41,11 +57,11 @@ pub fn scan_and_build_library(path: &str) -> Library {
         insert_track(&mut library, meta, path_buf);
     }
 
-    // Sort each album by ID3 track number; untagged tracks fall to the end
+    // Sort each album by ID3 track number; untagged tracks go to the end,
     // sorted alphabetically by path.
     for albums in library.values_mut() {
-        for tracks in albums.values_mut() {
-            tracks.sort_by(|a, b| {
+        for album in albums.values_mut() {
+            album.tracks.sort_by(|a, b| {
                 a.track_num
                     .cmp(&b.track_num)
                     .then_with(|| a.path.cmp(&b.path))
@@ -61,10 +77,10 @@ struct TrackMeta {
     album: String,
     title: String,
     track_num: u32,
+    art_bytes: Option<Arc<Vec<u8>>>,
 }
 
 fn extract_metadata(path: &Path) -> TrackMeta {
-    // Filename stem is the display fallback — verbatim, no stripping.
     let fallback_title = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -75,6 +91,7 @@ fn extract_metadata(path: &Path) -> TrackMeta {
         album: UNKNOWN_ALBUM.into(),
         title: fallback_title.clone(),
         track_num: u32::MAX,
+        art_bytes: None,
     };
 
     let Ok(tagged_file) = read_from_path(path) else {
@@ -83,6 +100,10 @@ fn extract_metadata(path: &Path) -> TrackMeta {
     let Some(tag) = tagged_file.primary_tag() else {
         return unknown();
     };
+
+    // First embedded picture wins. To strictly prefer a front cover swap
+    // `.first()` for a `.find(|p| p.pic_type() == PictureType::CoverFront)`.
+    let art_bytes = tag.pictures().first().map(|p| Arc::new(p.data().to_vec()));
 
     TrackMeta {
         artist: tag
@@ -101,18 +122,49 @@ fn extract_metadata(path: &Path) -> TrackMeta {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(fallback_title),
         track_num: tag.track().unwrap_or(u32::MAX),
+        art_bytes,
     }
 }
 
 fn insert_track(library: &mut Library, meta: TrackMeta, path: PathBuf) {
-    library
-        .entry(meta.artist)
+    let album = library
+        .entry(meta.artist.clone())
         .or_default()
-        .entry(meta.album)
-        .or_default()
-        .push(Track {
-            path,
-            title: meta.title,
-            track_num: meta.track_num,
+        .entry(meta.album.clone())
+        .or_insert_with(|| Album {
+            tracks: Vec::new(),
+            art_bytes: None,
         });
+
+    if album.art_bytes.is_none() {
+        album.art_bytes = meta.art_bytes;
+    }
+
+    album.tracks.push(Track {
+        path,
+        title: meta.title,
+        artist: meta.artist,
+        album: meta.album,
+        track_num: meta.track_num,
+    });
+}
+
+/// Decodes embedded cover art into RGBA pixels capped at 128x128.
+/// Returns `None` on any decode error — the UI just skips drawing.
+pub fn decode_art(bytes: &[u8]) -> Option<AlbumArt> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = img.thumbnail(128, 128);
+    let rgba = img.to_rgba8();
+    let width = rgba.width() as usize;
+    let height = rgba.height() as usize;
+    let raw = rgba.into_raw();
+    let mut pixels = Vec::with_capacity(raw.len() / 4);
+    for chunk in raw.chunks_exact(4) {
+        pixels.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Some(AlbumArt {
+        width,
+        height,
+        rgba: pixels,
+    })
 }

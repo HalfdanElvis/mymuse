@@ -39,7 +39,7 @@ fn main() {
 
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(Duration::from_millis(16));
+            std::thread::sleep(Duration::from_millis(33));
             if proxy.send_event(UserEvent::Tick).is_err() {
                 break;
             }
