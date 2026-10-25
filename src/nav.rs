@@ -1,41 +1,38 @@
-use mlua::MetaMethod::Le;
-
-// src/nav.rs
 use crate::library::Library;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Level {
-    Root,                     // "Artists", "Albums", "Songs", "Settings"
-    Artists,                  // List of artists
-    AlbumsOf(String),         // List of albums for a specific artist
-    TracksOf(String, String), // List of tracks for an artist + album
-    AllAlbums,                // Flat list of all albums
-    AllSongs,                 // Flat list of all songs
+    Root,
+    Artists,
+    AlbumsOf(String),
+    TracksOf(String, String),
+    AllAlbums,
+    AllSongs,
 }
 
 pub struct NavState {
     pub library: Library,
-    pub level_stack: Vec<(Level, usize, usize)>, // (Current Level, selected_index, scroll_offset)
+    // (Current Level, selected_index, scroll_offset)
+    pub level_stack: Vec<(Level, usize, usize)>,
 }
 
 impl NavState {
     pub fn new(library: Library) -> Self {
         Self {
             library,
-            // Start at Root with index and offset 0
             level_stack: vec![(Level::Root, 0, 0)],
         }
     }
 
-    // Get the current level and selected index
     pub fn current(&self) -> &(Level, usize, usize) {
         self.level_stack.last().unwrap()
     }
 
+    // --- Playlist / item resolution --------------------------------------
+
     pub fn get_current_playlist(&self) -> Vec<PathBuf> {
-        let (level, _, _) = self.current();
-        match level {
+        match &self.current().0 {
             Level::TracksOf(artist, album) => self
                 .library
                 .get(artist)
@@ -57,10 +54,7 @@ impl NavState {
                     .map(move |album| (artist.clone(), album.clone()))
             })
             .collect();
-        // Potentially add toggle to sorting, currently sorting by album names, could be sorting by artist
-        // then album name or something else.
         albums.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-
         albums
     }
 
@@ -71,7 +65,6 @@ impl NavState {
             .flat_map(|albums_map| albums_map.values())
             .flat_map(|tracks| tracks.iter().cloned())
             .collect();
-
         songs.sort_by(|a, b| {
             let a_name = a.file_stem().unwrap_or_default().to_string_lossy();
             let b_name = b.file_stem().unwrap_or_default().to_string_lossy();
@@ -80,120 +73,130 @@ impl NavState {
         songs
     }
 
-    // Get the list of strings to display for the current level
+    // --- Display items ---------------------------------------------------
+
     pub fn get_items(&self) -> Vec<String> {
         let (level, _, _) = self.current();
         match level {
-            Level::Root => vec![
-                "Artists".to_string(),
-                "Albums".to_string(),
-                "Songs".to_string(),
-                "Settings".to_string(),
-            ],
-            Level::Artists => self.library.keys().cloned().collect(),
-            Level::AlbumsOf(artist) => self
-                .library
-                .get(artist)
-                .map(|albums| albums.keys().cloned().collect())
-                .unwrap_or_default(),
-            Level::TracksOf(artist, album) => self
-                .library
-                .get(artist)
-                .and_then(|albums| albums.get(album))
-                .map(|tracks| {
-                    tracks
-                        .iter()
-                        .map(|p| {
-                            p.file_stem()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string()
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Level::AllAlbums => self
-                .get_all_albums()
-                .into_iter()
-                .map(|(artist, album)| album)
-                .collect(),
-
-            Level::AllSongs => self
-                .get_all_songs()
-                .into_iter()
-                .map(|p| {
-                    p.file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .collect(),
+            Level::Root => Self::root_items(),
+            Level::Artists => self.artist_items(),
+            Level::AlbumsOf(artist) => self.album_items(artist),
+            Level::TracksOf(artist, album) => self.track_items(artist, album),
+            Level::AllAlbums => self.all_album_items(),
+            Level::AllSongs => self.all_song_items(),
         }
     }
 
-    // Handle the Enter key
+    fn root_items() -> Vec<String> {
+        ["Artists", "Albums", "Songs", "Settings"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn artist_items(&self) -> Vec<String> {
+        self.library.keys().cloned().collect()
+    }
+
+    fn album_items(&self, artist: &str) -> Vec<String> {
+        self.library
+            .get(artist)
+            .map(|albums| albums.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn track_items(&self, artist: &str, album: &str) -> Vec<String> {
+        self.library
+            .get(artist)
+            .and_then(|albums| albums.get(album))
+            .map(|tracks| tracks.iter().map(track_display_name).collect())
+            .unwrap_or_default()
+    }
+
+    fn all_album_items(&self) -> Vec<String> {
+        self.get_all_albums()
+            .into_iter()
+            .map(|(_, album)| album)
+            .collect()
+    }
+
+    fn all_song_items(&self) -> Vec<String> {
+        self.get_all_songs()
+            .into_iter()
+            .map(|p| track_display_name(&p))
+            .collect()
+    }
+
+    // --- Navigation ------------------------------------------------------
+
     pub fn enter(&mut self) -> Option<PathBuf> {
         let (level, selected_idx, _) = self.current().clone();
         let items = self.get_items();
-
         if items.is_empty() {
             return None;
         }
-
-        let selected_item = &items[selected_idx];
+        let selected = items[selected_idx].clone();
 
         match level {
             Level::Root => {
-                match selected_item.as_str() {
-                    "Artists" => self.level_stack.push((Level::Artists, 0, 0)),
-                    "Albums" => self.level_stack.push((Level::AllAlbums, 0, 0)),
-                    "Songs" => self.level_stack.push((Level::AllSongs, 0, 0)),
-                    _ => {} // Settings, Albums...
-                }
+                self.enter_root(&selected);
                 None
             }
             Level::Artists => {
-                self.level_stack
-                    .push((Level::AlbumsOf(selected_item.clone()), 0, 0));
+                self.level_stack.push((Level::AlbumsOf(selected), 0, 0));
                 None
             }
             Level::AlbumsOf(artist) => {
                 self.level_stack
-                    .push((Level::TracksOf(artist, selected_item.clone()), 0, 0));
+                    .push((Level::TracksOf(artist, selected), 0, 0));
                 None
             }
-            Level::TracksOf(artist, album) => {
-                // We actually want to play a file now!
-                self.library
-                    .get(&artist)
-                    .and_then(|a| a.get(&album))
-                    .and_then(|tracks| tracks.get(selected_idx))
-                    .cloned()
-            }
+            Level::TracksOf(artist, album) => self.track_at(&artist, &album, selected_idx),
             Level::AllAlbums => {
-                /* find song and return path */
-                let albums = self.get_all_albums();
-                if let Some((artist, album)) = albums.get(selected_idx) {
-                    self.level_stack
-                        .push((Level::TracksOf(artist.clone(), album.clone()), 0, 0));
-                }
+                self.enter_all_album(selected_idx);
                 None
             }
-            Level::AllSongs => {
-                /* find song and return path */
-                let songs = self.get_all_songs();
-                songs.get(selected_idx).cloned()
-            }
+            Level::AllSongs => self.get_all_songs().get(selected_idx).cloned(),
         }
     }
 
-    // Handle the Back/Escape key
+    fn enter_root(&mut self, selected: &str) {
+        match selected {
+            "Artists" => self.level_stack.push((Level::Artists, 0, 0)),
+            "Albums" => self.level_stack.push((Level::AllAlbums, 0, 0)),
+            "Songs" => self.level_stack.push((Level::AllSongs, 0, 0)),
+            _ => {} // Settings not implemented
+        }
+    }
+
+    fn enter_all_album(&mut self, idx: usize) {
+        if let Some((artist, album)) = self.get_all_albums().get(idx) {
+            self.level_stack
+                .push((Level::TracksOf(artist.clone(), album.clone()), 0, 0));
+        }
+    }
+
+    fn track_at(&self, artist: &str, album: &str, idx: usize) -> Option<PathBuf> {
+        self.library
+            .get(artist)
+            .and_then(|a| a.get(album))
+            .and_then(|tracks| tracks.get(idx))
+            .cloned()
+    }
+
     pub fn back(&mut self) -> bool {
         if self.level_stack.len() > 1 {
             self.level_stack.pop();
-            true // We went back
+            true
         } else {
-            false // We are at the root, maybe exit the app
+            false
         }
     }
+}
+
+fn track_display_name(path: &PathBuf) -> String {
+    path.file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }

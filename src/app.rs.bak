@@ -1,5 +1,6 @@
 // src/app.rs
 use std::num::NonZeroU32;
+use std::path::PathBuf; // <-- ADDED
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,10 +10,7 @@ use winit::{
     dpi::PhysicalSize,
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::ActiveEventLoop,
-    keyboard::{
-        KeyCode::{self, ScrollLock},
-        PhysicalKey,
-    },
+    keyboard::{KeyCode, PhysicalKey}, // <-- Removed ScrollLock
     window::Window,
 };
 
@@ -79,6 +77,32 @@ impl App {
             pingpong_scroll: true,
         }
     }
+
+    // MOVED THIS INSIDE THE IMPL BLOCK
+    fn play_track_from_queue(&mut self, path: PathBuf, queue: Vec<PathBuf>, index: usize) {
+        match audio::play_track(&self.player, &path) {
+            Ok(info) => {
+                println!("Playing: {}", info.title);
+                self.now_playing_start_time = Instant::now();
+                self.now_playing = Some(NowPlayingState {
+                    title: info.title,
+                    artist: info.artist,
+                    duration: info.duration,
+                    queue,
+                    queue_index: index,
+                    has_ended: false,
+                });
+                self.window.as_ref().unwrap().request_redraw();
+            }
+            Err(e) => {
+                eprintln!("Error playing track: {}", e);
+                // If a song fails to play, mark it as ended so we skip to the next one
+                if let Some(np) = &mut self.now_playing {
+                    np.has_ended = true;
+                }
+            }
+        }
+    }
 }
 
 fn clock_string() -> String {
@@ -88,31 +112,6 @@ fn clock_string() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
-}
-
-fn play_track_from_queue(&mut self, path: PathBuf, queue: Vec<PathBuf>, index: usize) {
-    match audio::play_track(&self.player, &path) {
-        Ok(info) => {
-            println!("Playing: {}", info.title);
-            self.now_playing_start_time = Instant::now();
-            self.now_playing = Some(NowPlayingState {
-                title: info.title,
-                artist: info.artist,
-                duration: info.duration,
-                queue,
-                queue_index: index,
-                has_ended: false,
-            });
-            self.window.as_ref().unwrap().request_redraw();
-        }
-        Err(e) => {
-            eprintln!("Error playing track: {}", e);
-            // If a song fails to play, mark it as ended so we skip to the next one
-            if let Some(np) = &mut self.now_playing {
-                np.has_ended = true;
-            }
-        }
-    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -198,10 +197,13 @@ impl ApplicationHandler<UserEvent> for App {
 
                     if let Some(track_path) = self.nav.enter() {
                         let queue = self.nav.get_current_playlist();
-                        let queue_index = queue_iter().position(|p| p == &track_path).unwrap_or(0);
+                        // FIXED queue_iter() to queue.iter()
+                        let queue_index = queue.iter().position(|p| p == &track_path).unwrap_or(0);
+                        
                         self.play_track_from_queue(track_path, queue, queue_index);
                     }
-                    self.window.as_ref().unwrap.request_redraw();
+                    // FIXED .unwrap to .unwrap()
+                    self.window.as_ref().unwrap().request_redraw();
                 }
                 _ => {}
             },
@@ -210,7 +212,6 @@ impl ApplicationHandler<UserEvent> for App {
                     let clock = clock_string();
                     let elapsed = self.player.get_pos().as_secs_f32();
 
-                    // Fetch data from Navstate and generate title based on curr level
                     let items = self.nav.get_items();
                     let (_, selected_index, scroll_offset) = self.nav.current().clone();
 
@@ -253,6 +254,7 @@ impl ApplicationHandler<UserEvent> for App {
                             list_scroll = Some((offset, text_w));
                         }
                     }
+                    
                     // 2. Now Playing Scrolling timer
                     let now_hover_secs = self.now_playing_start_time.elapsed().as_secs_f32();
                     if now_hover_secs > SCROLL_START_TIME {
@@ -289,7 +291,6 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
 
-                    // Now Playing Scrolling timer
                     let title = match &self.nav.current().0 {
                         Level::Root => "MyMuse".to_string(),
                         Level::Artists => "Artists".to_string(),
