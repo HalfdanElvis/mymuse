@@ -28,6 +28,12 @@ pub const MIN_LOOP_DISTANCE: f32 = 20.0;
 const SLIDESHOW_INTERVAL: Duration = Duration::from_secs(4);
 const TRANSITION_DURATION: Duration = Duration::from_millis(500);
 
+// --- Seek / skip behaviour ---
+const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
+const HOLD_REPEAT_INTERVAL: Duration = Duration::from_millis(500);
+const SEEK_STEP_SECS: f32 = 5.0;
+const PREV_TRACK_THRESHOLD_SECS: f32 = 3.0;
+
 #[derive(Debug, Clone, Copy)]
 pub enum UserEvent {
     Tick,
@@ -40,6 +46,13 @@ struct NowPlayingState {
     queue_index: usize,
     has_ended: bool,
     art: Option<Arc<AlbumArt>>,
+}
+
+struct SeekHold {
+    key: KeyCode,
+    started: Instant,
+    last_action: Option<Instant>,
+    hold_triggered: bool,
 }
 
 struct PaneArtState {
@@ -67,8 +80,6 @@ impl PaneArtState {
     }
 }
 
-/// All album art, decoded once at startup. No eviction — bounded by
-/// library size (~64 KB per album at 128×128 RGBA).
 struct ArtCache {
     entries: HashMap<(String, String), Arc<AlbumArt>>,
 }
@@ -103,6 +114,7 @@ pub struct App {
     pingpong_scroll: bool,
     pane_art: PaneArtState,
     art_cache: ArtCache,
+    seek_hold: Option<SeekHold>,
 }
 
 impl App {
@@ -130,11 +142,10 @@ impl App {
             pingpong_scroll: true,
             pane_art: PaneArtState::new(),
             art_cache,
+            seek_hold: None,
         }
     }
 
-    /// Decode every album's embedded cover up front, in parallel across all
-    /// cores. Albums without embedded art are skipped silently.
     fn preload_album_art(nav: &NavState) -> ArtCache {
         let albums = nav.all_albums();
         let total = albums.len();
@@ -204,9 +215,6 @@ impl App {
     fn play_track_from_queue(&mut self, track: Track, queue: Vec<Track>, index: usize) {
         match audio::play_track(&self.player, &track.path) {
             Ok(duration) => {
-                // Ensure we're not stuck paused if the user paused the
-                // previous track and then picked / auto-advanced into a new
-                // one. Picking a track should play it.
                 self.player.play();
 
                 self.now_playing_start_time = Instant::now();
@@ -244,12 +252,182 @@ impl App {
     }
 
     fn on_tick(&mut self) {
+        self.process_seek_hold();
         if let Some((track, queue, idx)) = self.next_track_if_ended() {
             self.play_track_from_queue(track, queue, idx);
         }
         self.update_pane_art();
         self.request_redraw();
     }
+
+    // --- Seek / skip ----------------------------------------------------
+
+    fn start_seek_hold(&mut self, key: KeyCode) {
+        self.seek_hold = Some(SeekHold {
+            key,
+            started: Instant::now(),
+            last_action: None,
+            hold_triggered: false,
+        });
+    }
+
+    fn process_seek_hold(&mut self) {
+        let dir = {
+            let Some(hold) = &mut self.seek_hold else {
+                return;
+            };
+            if hold.started.elapsed() < HOLD_THRESHOLD {
+                return;
+            }
+            let due = match hold.last_action {
+                None => true,
+                Some(t) => t.elapsed() >= HOLD_REPEAT_INTERVAL,
+            };
+            if !due {
+                return;
+            }
+            hold.hold_triggered = true;
+            hold.last_action = Some(Instant::now());
+            if hold.key == KeyCode::ArrowRight {
+                1.0
+            } else {
+                -1.0
+            }
+        };
+        self.seek_relative(dir * SEEK_STEP_SECS);
+        self.request_redraw();
+    }
+
+    fn handle_seek_release(&mut self, key: KeyCode) {
+        let Some(hold) = &self.seek_hold else { return };
+        if hold.key != key {
+            return;
+        }
+        let hold = self.seek_hold.take().unwrap();
+        let held_for = hold.started.elapsed();
+
+        if held_for < HOLD_THRESHOLD {
+            match key {
+                KeyCode::ArrowRight => self.tap_right(),
+                KeyCode::ArrowLeft => self.tap_left(),
+                _ => {}
+            }
+        } else if !hold.hold_triggered {
+            let dir = if key == KeyCode::ArrowRight {
+                1.0
+            } else {
+                -1.0
+            };
+            self.seek_relative(dir * SEEK_STEP_SECS);
+            self.request_redraw();
+        }
+    }
+
+    fn tap_right(&mut self) {
+        let (track, queue, next_idx) = {
+            let Some(np) = &self.now_playing else { return };
+            let next_idx = np.queue_index + 1;
+            if next_idx >= np.queue.len() {
+                return;
+            }
+            (np.queue[next_idx].clone(), np.queue.clone(), next_idx)
+        };
+        self.play_track_from_queue(track, queue, next_idx);
+    }
+
+    fn tap_left(&mut self) {
+        let pos = self.player.get_pos().as_secs_f32();
+
+        if pos < PREV_TRACK_THRESHOLD_SECS {
+            let prev = {
+                let Some(np) = &self.now_playing else { return };
+                if np.queue_index == 0 {
+                    None
+                } else {
+                    let prev_idx = np.queue_index - 1;
+                    Some((np.queue[prev_idx].clone(), np.queue.clone(), prev_idx))
+                }
+            };
+            if let Some((track, queue, prev_idx)) = prev {
+                self.play_track_from_queue(track, queue, prev_idx);
+                return;
+            }
+        }
+
+        // Restart current track.
+        self.seek_to_secs(0.0);
+    }
+
+    /// Try an in-place seek. On failure (rodio's Symphonia decoder returns
+    /// `SeekError(ForwardOnly)` for many backward seeks) reload the track
+    /// from disk — a fresh decoder can seek forward — and seek there.
+    fn seek_to_secs(&mut self, secs: f32) {
+        if self.now_playing.is_none() {
+            return;
+        }
+        let target = secs.max(0.0);
+
+        if let Err(_e) = self.player.try_seek(Duration::from_secs_f32(target)) {
+            //  eprintln!("Seek failed ({}); reloading track at {:.1}s", e, target);
+            self.reload_current_at(target);
+        }
+        self.request_redraw();
+    }
+
+    fn seek_relative(&mut self, delta_secs: f32) {
+        let duration = match &self.now_playing {
+            Some(np) if np.duration > 0.0 => np.duration,
+            _ => return,
+        };
+        let pos = self.player.get_pos().as_secs_f32();
+        let target = (pos + delta_secs).clamp(0.0, duration);
+        self.seek_to_secs(target);
+    }
+
+    /// Reload the currently-playing track from its file and forward-seek to
+    /// `position`. Used as a fallback when the existing decoder cannot seek
+    /// backwards. `position == 0.0` needs no seek at all.
+    fn reload_current_at(&mut self, position: f32) {
+        let (track, queue, index, art) = {
+            let Some(np) = &self.now_playing else { return };
+            (
+                np.track.clone(),
+                np.queue.clone(),
+                np.queue_index,
+                np.art.clone(),
+            )
+        };
+
+        match audio::play_track(&self.player, &track.path) {
+            Ok(duration) => {
+                self.player.play();
+
+                self.now_playing = Some(NowPlayingState {
+                    track,
+                    duration,
+                    queue,
+                    queue_index: index,
+                    has_ended: false,
+                    art,
+                });
+
+                if position > 0.0 {
+                    let target = position.clamp(0.0, duration);
+                    if let Err(e) = self.player.try_seek(Duration::from_secs_f32(target)) {
+                        // If forward-seek after reload also fails, start
+                        // from 0 rather than leaving the track silent.
+                        eprintln!("Forward seek after reload failed ({}); starting from 0", e);
+                    }
+                }
+
+                self.now_playing_start_time = Instant::now();
+                self.request_redraw();
+            }
+            Err(e) => eprintln!("Reload failed: {}", e),
+        }
+    }
+
+    // --- End seek / skip ------------------------------------------------
 
     fn update_pane_art(&mut self) {
         let level = self.nav.current().0.clone();
@@ -352,6 +530,7 @@ impl App {
             KeyCode::ArrowUp => self.nav_up(),
             KeyCode::Enter => self.nav_enter(),
             KeyCode::Space => self.toggle_pause(),
+            KeyCode::ArrowLeft | KeyCode::ArrowRight => self.start_seek_hold(key_code),
             _ => {}
         }
     }
@@ -469,8 +648,6 @@ impl App {
             list_scroll,
             now_scroll,
             is_reversing: self.pingpong_scroll,
-            // A track that has finished (player empty) is also "not playing":
-            // show the play triangle rather than the pause stripes.
             is_paused: self.player.is_paused() || self.player.empty(),
         };
 
@@ -581,11 +758,20 @@ impl ApplicationHandler<UserEvent> for App {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(key_code),
-                        state: ElementState::Pressed,
+                        state,
+                        repeat,
                         ..
                     },
                 ..
-            } => self.handle_key(event_loop, key_code),
+            } => match state {
+                ElementState::Pressed => {
+                    if repeat && matches!(key_code, KeyCode::ArrowLeft | KeyCode::ArrowRight) {
+                        return;
+                    }
+                    self.handle_key(event_loop, key_code);
+                }
+                ElementState::Released => self.handle_seek_release(key_code),
+            },
             WindowEvent::RedrawRequested => self.render(),
             _ => {}
         }
