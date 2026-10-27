@@ -19,48 +19,10 @@ impl App {
             self.header_scroll_start = Instant::now();
         }
 
-        let header_scroll = self.scroll_state(
-            &title,
-            self.ui.layout.font_size_header,
-            self.ui.layout.header_max_width,
-            self.ui.layout.header_scroll_gap,
-            self.header_scroll_start,
-        );
-
         let (pane_art_prev, pane_art_curr, pane_art_progress) = self.get_pane_art();
         let now_art_owned = self.now_playing.as_ref().and_then(|np| np.art.clone());
 
         let items_slice = self.nav.get_items();
-
-        let list_scroll = items_slice.get(selected_index).and_then(|text| {
-            self.scroll_state(
-                text,
-                self.ui.layout.font_size_list,
-                self.ui.layout.list_item_max_width,
-                self.ui.layout.list_scroll_gap,
-                self.hover_start_time,
-            )
-        });
-
-        let now_scroll = self.now_playing.as_ref().and_then(|np| {
-            self.scroll_state(
-                &np.track.title,
-                self.ui.layout.font_size_nowplay,
-                self.ui.layout.nowplay_max_width,
-                self.ui.layout.nowplay_scroll_gap,
-                self.now_playing_start_time,
-            )
-        });
-
-        let artist_scroll = self.now_playing.as_ref().and_then(|np| {
-            self.scroll_state(
-                &np.track.artist,
-                self.ui.layout.font_size_artist,
-                self.ui.layout.artist_max_width,
-                self.ui.layout.artist_scroll_gap,
-                self.now_playing_start_time,
-            )
-        });
 
         let now_view = self.now_playing.as_ref().map(|np| NowPlaying {
             title: &np.track.title,
@@ -83,10 +45,10 @@ impl App {
             pane_art_prev: pane_art_prev.as_deref(),
             pane_art: pane_art_curr.as_deref(),
             pane_art_progress,
-            list_scroll,
-            now_scroll,
-            header_scroll,
-            artist_scroll,
+            list_scroll_elapsed: self.hover_start_time.elapsed().as_secs_f32(),
+            now_scroll_elapsed: self.now_playing_start_time.elapsed().as_secs_f32(),
+            header_scroll_elapsed: self.header_scroll_start.elapsed().as_secs_f32(),
+            artist_scroll_elapsed: self.now_playing_start_time.elapsed().as_secs_f32(),
             is_reversing: self.pingpong_scroll,
             is_paused: self.player.is_paused() || self.player.empty(),
         };

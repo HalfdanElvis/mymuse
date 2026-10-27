@@ -28,29 +28,16 @@ pub struct UiFrame<'a> {
     pub pane_art_prev: Option<&'a AlbumArt>,
     pub pane_art: Option<&'a AlbumArt>,
     pub pane_art_progress: f32,
-    pub list_scroll: Option<(f32, f32)>,
-    pub now_scroll: Option<(f32, f32)>,
-    pub header_scroll: Option<(f32, f32)>,
-    pub artist_scroll: Option<(f32, f32)>,
+    /// Seconds since the respective scroll timers were (re)started. Lua
+    /// computes the resulting scroll offset from these and its own layout
+    /// constants — Rust no longer needs to know font sizes or max widths.
+    pub list_scroll_elapsed: f32,
+    pub now_scroll_elapsed: f32,
+    pub header_scroll_elapsed: f32,
+    pub artist_scroll_elapsed: f32,
     pub is_reversing: bool,
     pub scroll_offset: usize,
     pub is_paused: bool,
-}
-
-pub struct LayoutConfig {
-    pub font_size_list: f32,
-    pub list_item_max_width: f32,
-    pub font_size_nowplay: f32,
-    pub nowplay_max_width: f32,
-    pub font_size_header: f32,
-    pub header_max_width: f32,
-    pub font_size_artist: f32,
-    pub artist_max_width: f32,
-    pub list_scroll_gap: f32,
-    pub nowplay_scroll_gap: f32,
-    pub header_scroll_gap: f32,
-    pub artist_scroll_gap: f32,
-    pub visible_rows: usize,
 }
 
 pub struct UiEngine {
@@ -58,7 +45,7 @@ pub struct UiEngine {
     pub(super) pixmap: Pixmap,
     pub(super) font: Arc<Font>,
     line_ratio: f32,
-    pub layout: LayoutConfig,
+    pub visible_rows: usize,
     pub(super) buffer: Vec<u32>,
     pub(super) width: usize,
     pub(super) height: usize,
@@ -103,29 +90,14 @@ impl UiEngine {
 
         let config_fn: mlua::Function = lua.globals().get("get_layout_config").unwrap();
         let config_table: mlua::Table = config_fn.call(()).unwrap();
-
-        let layout = LayoutConfig {
-            font_size_list: config_table.get("ITEM_FONT").unwrap(),
-            list_item_max_width: config_table.get("LIST_ITEM_MAX_WIDTH").unwrap(),
-            font_size_nowplay: config_table.get("NOWPLAY_TITLE_FONT").unwrap(),
-            nowplay_max_width: config_table.get("NOWPLAY_MAX_WIDTH").unwrap(),
-            font_size_header: config_table.get("HEADER_FONT").unwrap(),
-            header_max_width: config_table.get("HEADER_MAX_WIDTH").unwrap(),
-            font_size_artist: config_table.get("NOWPLAY_ARTIST_FONT").unwrap(),
-            artist_max_width: config_table.get("NOWPLAY_ARTIST_MAX_WIDTH").unwrap(),
-            list_scroll_gap: config_table.get("LIST_SCROLL_GAP").unwrap(),
-            nowplay_scroll_gap: config_table.get("NOWPLAY_SCROLL_GAP").unwrap(),
-            header_scroll_gap: config_table.get("HEADER_SCROLL_GAP").unwrap(),
-            artist_scroll_gap: config_table.get("ARTIST_SCROLL_GAP").unwrap(),
-            visible_rows: config_table.get("VISIBLE_ROWS").unwrap(),
-        };
+        let visible_rows: usize = config_table.get("VISIBLE_ROWS").unwrap();
 
         Self {
             lua,
             pixmap,
             font,
             line_ratio,
-            layout,
+            visible_rows,
             buffer,
             width,
             height,
@@ -155,15 +127,12 @@ impl UiEngine {
                 "triangle" => self.draw_triangle(&cmd),
                 "album_art_prev" => {
                     if pane_art.is_none() {
-                        self.draw_album_art(
-                            &cmd,
-                            pane_art_prev,
-                            (1.0 - pane_art_progress) * 255.0,
-                        );
+                        self.draw_album_art(&cmd, pane_art_prev, (1.0 - pane_art_progress) * 255.0);
                     }
                 }
-                "album_art" => self
-                    .draw_album_art_crossfade(&cmd, pane_art_prev, pane_art, pane_art_progress),
+                "album_art" => {
+                    self.draw_album_art_crossfade(&cmd, pane_art_prev, pane_art, pane_art_progress)
+                }
                 "now_art_thumb" => self.draw_album_art(&cmd, now_art, 255.0),
                 _ => {}
             }
@@ -200,6 +169,18 @@ impl UiEngine {
             .set("has_pane_art_prev", frame.pane_art_prev.is_some())
             .unwrap();
         state.set("is_paused", frame.is_paused).unwrap();
+        state
+            .set("list_scroll_elapsed", frame.list_scroll_elapsed)
+            .unwrap();
+        state
+            .set("now_scroll_elapsed", frame.now_scroll_elapsed)
+            .unwrap();
+        state
+            .set("header_scroll_elapsed", frame.header_scroll_elapsed)
+            .unwrap();
+        state
+            .set("artist_scroll_elapsed", frame.artist_scroll_elapsed)
+            .unwrap();
 
         if let Some(np) = &frame.now {
             let table = self.lua.create_table().unwrap();
@@ -208,34 +189,6 @@ impl UiEngine {
             table.set("elapsed", np.elapsed).unwrap();
             table.set("duration", np.duration).unwrap();
             state.set("now", table).unwrap();
-        }
-
-        if let Some((offset, width)) = frame.list_scroll {
-            let t = self.lua.create_table().unwrap();
-            t.set(1, offset).unwrap();
-            t.set(2, width).unwrap();
-            state.set("list_scroll", t).unwrap();
-        }
-
-        if let Some((offset, width)) = frame.now_scroll {
-            let t = self.lua.create_table().unwrap();
-            t.set(1, offset).unwrap();
-            t.set(2, width).unwrap();
-            state.set("now_scroll", t).unwrap();
-        }
-
-        if let Some((offset, width)) = frame.header_scroll {
-            let t = self.lua.create_table().unwrap();
-            t.set(1, offset).unwrap();
-            t.set(2, width).unwrap();
-            state.set("header_scroll", t).unwrap();
-        }
-
-        if let Some((offset, width)) = frame.artist_scroll {
-            let t = self.lua.create_table().unwrap();
-            t.set(1, offset).unwrap();
-            t.set(2, width).unwrap();
-            state.set("artist_scroll", t).unwrap();
         }
 
         state
@@ -248,14 +201,5 @@ impl UiEngine {
             let b = pixel.blue() as u32;
             self.buffer[i] = (r << 16) | (g << 8) | b;
         }
-    }
-
-    pub fn measure_text(&self, text: &str, size: f32) -> f32 {
-        let mut width = 0.0;
-        for c in text.chars() {
-            let (metrics, _) = self.font.rasterize(c, size);
-            width += metrics.advance_width;
-        }
-        width
     }
 }

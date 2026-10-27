@@ -42,7 +42,7 @@ impl App {
         }
         if let Some((_, idx_mut, scroll_mut)) = self.nav.level_stack.last_mut() {
             *idx_mut += 1;
-            if *idx_mut >= *scroll_mut + self.ui.layout.visible_rows {
+            if *idx_mut >= *scroll_mut + self.ui.visible_rows {
                 *scroll_mut += 1;
             }
         }
