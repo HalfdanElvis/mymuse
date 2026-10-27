@@ -28,7 +28,6 @@ pub const MIN_LOOP_DISTANCE: f32 = 20.0;
 const SLIDESHOW_INTERVAL: Duration = Duration::from_secs(4);
 const TRANSITION_DURATION: Duration = Duration::from_millis(500);
 
-// --- Seek / skip behaviour ---
 const HOLD_THRESHOLD: Duration = Duration::from_millis(500);
 const HOLD_REPEAT_INTERVAL: Duration = Duration::from_millis(500);
 const SEEK_STEP_SECS: f32 = 5.0;
@@ -111,6 +110,8 @@ pub struct App {
     nav: NavState,
     hover_start_time: Instant,
     now_playing_start_time: Instant,
+    header_scroll_start: Instant,
+    last_header_title: Option<String>,
     pingpong_scroll: bool,
     pane_art: PaneArtState,
     art_cache: ArtCache,
@@ -139,6 +140,8 @@ impl App {
             nav,
             hover_start_time: Instant::now(),
             now_playing_start_time: Instant::now(),
+            header_scroll_start: Instant::now(),
+            last_header_title: None,
             pingpong_scroll: true,
             pane_art: PaneArtState::new(),
             art_cache,
@@ -260,8 +263,6 @@ impl App {
         self.request_redraw();
     }
 
-    // --- Seek / skip ----------------------------------------------------
-
     fn start_seek_hold(&mut self, key: KeyCode) {
         self.seek_hold = Some(SeekHold {
             key,
@@ -354,13 +355,9 @@ impl App {
             }
         }
 
-        // Restart current track.
         self.seek_to_secs(0.0);
     }
 
-    /// Try an in-place seek. On failure (rodio's Symphonia decoder returns
-    /// `SeekError(ForwardOnly)` for many backward seeks) reload the track
-    /// from disk — a fresh decoder can seek forward — and seek there.
     fn seek_to_secs(&mut self, secs: f32) {
         if self.now_playing.is_none() {
             return;
@@ -368,7 +365,6 @@ impl App {
         let target = secs.max(0.0);
 
         if let Err(_e) = self.player.try_seek(Duration::from_secs_f32(target)) {
-            //  eprintln!("Seek failed ({}); reloading track at {:.1}s", e, target);
             self.reload_current_at(target);
         }
         self.request_redraw();
@@ -384,9 +380,6 @@ impl App {
         self.seek_to_secs(target);
     }
 
-    /// Reload the currently-playing track from its file and forward-seek to
-    /// `position`. Used as a fallback when the existing decoder cannot seek
-    /// backwards. `position == 0.0` needs no seek at all.
     fn reload_current_at(&mut self, position: f32) {
         let (track, queue, index, art) = {
             let Some(np) = &self.now_playing else { return };
@@ -414,8 +407,6 @@ impl App {
                 if position > 0.0 {
                     let target = position.clamp(0.0, duration);
                     if let Err(e) = self.player.try_seek(Duration::from_secs_f32(target)) {
-                        // If forward-seek after reload also fails, start
-                        // from 0 rather than leaving the track silent.
                         eprintln!("Forward seek after reload failed ({}); starting from 0", e);
                     }
                 }
@@ -426,8 +417,6 @@ impl App {
             Err(e) => eprintln!("Reload failed: {}", e),
         }
     }
-
-    // --- End seek / skip ------------------------------------------------
 
     fn update_pane_art(&mut self) {
         let level = self.nav.current().0.clone();
@@ -599,6 +588,20 @@ impl App {
         let (level, selected_index, scroll_offset) = self.nav.current().clone();
         let title = level_title(&level);
 
+        // Reset header-scroll timer whenever the header text changes (level change).
+        if self.last_header_title.as_deref() != Some(title.as_str()) {
+            self.last_header_title = Some(title.clone());
+            self.header_scroll_start = Instant::now();
+        }
+
+        let header_scroll = self.scroll_state(
+            &title,
+            self.ui.layout.font_size_header,
+            self.ui.layout.header_max_width,
+            self.ui.layout.header_scroll_gap,
+            self.header_scroll_start,
+        );
+
         let (pane_art_prev, pane_art_curr, pane_art_progress) = self.get_pane_art();
         let now_art_owned = self.now_playing.as_ref().and_then(|np| np.art.clone());
 
@@ -620,6 +623,16 @@ impl App {
                 self.ui.layout.font_size_nowplay,
                 self.ui.layout.nowplay_max_width,
                 self.ui.layout.nowplay_scroll_gap,
+                self.now_playing_start_time,
+            )
+        });
+
+        let artist_scroll = self.now_playing.as_ref().and_then(|np| {
+            self.scroll_state(
+                &np.track.artist,
+                self.ui.layout.font_size_artist,
+                self.ui.layout.artist_max_width,
+                self.ui.layout.artist_scroll_gap,
                 self.now_playing_start_time,
             )
         });
@@ -647,6 +660,8 @@ impl App {
             pane_art_progress,
             list_scroll,
             now_scroll,
+            header_scroll,
+            artist_scroll,
             is_reversing: self.pingpong_scroll,
             is_paused: self.player.is_paused() || self.player.empty(),
         };

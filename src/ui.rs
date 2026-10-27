@@ -31,6 +31,8 @@ pub struct UiFrame<'a> {
     pub pane_art_progress: f32,
     pub list_scroll: Option<(f32, f32)>,
     pub now_scroll: Option<(f32, f32)>,
+    pub header_scroll: Option<(f32, f32)>,
+    pub artist_scroll: Option<(f32, f32)>,
     pub is_reversing: bool,
     pub scroll_offset: usize,
     pub is_paused: bool,
@@ -41,8 +43,14 @@ pub struct LayoutConfig {
     pub list_item_max_width: f32,
     pub font_size_nowplay: f32,
     pub nowplay_max_width: f32,
+    pub font_size_header: f32,
+    pub header_max_width: f32,
+    pub font_size_artist: f32,
+    pub artist_max_width: f32,
     pub list_scroll_gap: f32,
     pub nowplay_scroll_gap: f32,
+    pub header_scroll_gap: f32,
+    pub artist_scroll_gap: f32,
     pub visible_rows: usize,
 }
 
@@ -77,9 +85,6 @@ impl UiEngine {
         let script = fs::read_to_string("ui.lua").expect("Could not find ui.lua");
         lua.load(&script).exec().expect("Failed to run Lua script");
 
-        // Expose `measure_text(text, size)` to Lua so layout code can
-        // right-align against actual rendered width instead of guessing.
-        // Shares the same `Arc<Font>` as the Rust-side `measure_text`.
         {
             let font_for_lua = font.clone();
             let measure_fn = lua
@@ -105,8 +110,14 @@ impl UiEngine {
             list_item_max_width: config_table.get("LIST_ITEM_MAX_WIDTH").unwrap(),
             font_size_nowplay: config_table.get("NOWPLAY_TITLE_FONT").unwrap(),
             nowplay_max_width: config_table.get("NOWPLAY_MAX_WIDTH").unwrap(),
+            font_size_header: config_table.get("HEADER_FONT").unwrap(),
+            header_max_width: config_table.get("HEADER_MAX_WIDTH").unwrap(),
+            font_size_artist: config_table.get("NOWPLAY_ARTIST_FONT").unwrap(),
+            artist_max_width: config_table.get("NOWPLAY_ARTIST_MAX_WIDTH").unwrap(),
             list_scroll_gap: config_table.get("LIST_SCROLL_GAP").unwrap(),
             nowplay_scroll_gap: config_table.get("NOWPLAY_SCROLL_GAP").unwrap(),
+            header_scroll_gap: config_table.get("HEADER_SCROLL_GAP").unwrap(),
+            artist_scroll_gap: config_table.get("ARTIST_SCROLL_GAP").unwrap(),
             visible_rows: config_table.get("VISIBLE_ROWS").unwrap(),
         };
 
@@ -145,12 +156,15 @@ impl UiEngine {
                 "triangle" => self.draw_triangle(&cmd),
                 "album_art_prev" => {
                     if pane_art.is_none() {
-                        self.draw_album_art(&cmd, pane_art_prev, (1.0 - pane_art_progress) * 255.0);
+                        self.draw_album_art(
+                            &cmd,
+                            pane_art_prev,
+                            (1.0 - pane_art_progress) * 255.0,
+                        );
                     }
                 }
-                "album_art" => {
-                    self.draw_album_art_crossfade(&cmd, pane_art_prev, pane_art, pane_art_progress)
-                }
+                "album_art" => self
+                    .draw_album_art_crossfade(&cmd, pane_art_prev, pane_art, pane_art_progress),
                 "now_art_thumb" => self.draw_album_art(&cmd, now_art, 255.0),
                 _ => {}
             }
@@ -211,6 +225,20 @@ impl UiEngine {
             state.set("now_scroll", t).unwrap();
         }
 
+        if let Some((offset, width)) = frame.header_scroll {
+            let t = self.lua.create_table().unwrap();
+            t.set(1, offset).unwrap();
+            t.set(2, width).unwrap();
+            state.set("header_scroll", t).unwrap();
+        }
+
+        if let Some((offset, width)) = frame.artist_scroll {
+            let t = self.lua.create_table().unwrap();
+            t.set(1, offset).unwrap();
+            t.set(2, width).unwrap();
+            state.set("artist_scroll", t).unwrap();
+        }
+
         state
     }
 
@@ -222,8 +250,6 @@ impl UiEngine {
             self.buffer[i] = (r << 16) | (g << 8) | b;
         }
     }
-
-    // --- Primitive drawing ----------------------------------------------
 
     fn draw_rect(&mut self, cmd: &Table) {
         let x: f32 = cmd.get("x").unwrap();
@@ -414,7 +440,8 @@ impl UiEngine {
         if w <= 0.0 || h <= 0.0 || art.width == 0 || art.height == 0 {
             return;
         }
-        let alpha = (alpha_mult.clamp(0.0, 255.0) * cmd_alpha.clamp(0.0, 255.0)) / (255.0 * 255.0);
+        let alpha =
+            (alpha_mult.clamp(0.0, 255.0) * cmd_alpha.clamp(0.0, 255.0)) / (255.0 * 255.0);
         if alpha <= 0.0 {
             return;
         }
@@ -555,7 +582,13 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny
     pb.finish()
 }
 
-fn rounded_triangle_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
+fn rounded_triangle_path(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+) -> Option<tiny_skia::Path> {
     let (ax, ay) = (x, y);
     let (bx, by) = (x, y + h);
     let (cx, cy) = (x + w, y + h / 2.0);
