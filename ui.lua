@@ -46,7 +46,7 @@ function draw_screen(state)
 	local COLOR_NOWPLAY_TEXT = 0xFFFFFFFF
 	local COLOR_NOWPLAY_DIM = 0xFF999999
 	local COLOR_PROGRESS_BG = 0xFF333333
-	local COLOR_PROGRESS_FG = 0xFF66AAFF
+	local COLOR_PROGRESS_FG = 0xFFFFFFFF
 	local COLOR_BATTERY = 0xFF88CC66
 
 	-- Placeholder cover colors, cycled by selection until real art exists.
@@ -101,7 +101,7 @@ function draw_screen(state)
 	local NOWPLAY_ART = 32
 	local NOWPLAY_TITLE_FONT = CONFIG.NOWPLAY_TITLE_FONT
 	local NOWPLAY_ARTIST_FONT = 8
-	local PROGRESS_H = 2
+	local PROGRESS_H = 3
 
 	-- FADE
 	local FADE_HEIGHT = 12
@@ -186,7 +186,7 @@ function draw_screen(state)
 		size = HEADER_FONT,
 	})
 
-	-- ===== 3. Right album-art panel (art of the selected item) =====
+	-- ===== 3. Right album-art panel =====
 	local art_x = SCREEN_W - ART_PANEL_W + ART_PAD
 	local art_y = CONTENT_TOP + math.floor((CONTENT_H - ART_SIZE) / 2)
 	local art_color = ART_PLACEHOLDER_COLORS[((selected - 1) % #ART_PLACEHOLDER_COLORS) + 1]
@@ -200,7 +200,6 @@ function draw_screen(state)
 		color = COLOR_ART_FRAME,
 	})
 
-	-- Draw the previous album art underneath (if it exists)
 	if state.has_pane_art_prev then
 		table.insert(cmds, {
 			type = "album_art_prev",
@@ -211,7 +210,6 @@ function draw_screen(state)
 		})
 	end
 
-	-- Draw the new album art on top (Rust handles the wipe based on progress)
 	if state.has_pane_art then
 		table.insert(cmds, {
 			type = "album_art",
@@ -221,7 +219,6 @@ function draw_screen(state)
 			height = ART_SIZE,
 		})
 	elseif not state.has_pane_art_prev then
-		-- Fallback placeholder if neither current nor previous art exists
 		table.insert(cmds, {
 			type = "rect",
 			x = art_x,
@@ -232,19 +229,16 @@ function draw_screen(state)
 		})
 	end
 
-	-- ===== 4. List (left pane, with scrolling) =====
+	-- ===== 4. List =====
 	local n = #state.items
 	local fully_visible_rows = math.max(1, math.floor(CONTENT_H / ITEM_H))
 
 	local first = state.scroll_offset + 1
-
-	-- Draw one extra row to enable peeking of next item
 	local last = math.min(n, first + CONFIG.VISIBLE_ROWS)
 
 	for i = first, last do
 		local y = CONTENT_TOP + (i - first) * ITEM_H
 
-		-- Marquee scroll state for the selected item
 		local scroll_x = 0
 		local text_w = 0
 		if i == selected and state.list_scroll then
@@ -271,7 +265,6 @@ function draw_screen(state)
 			clip_right = LIST_X + LIST_PAD_X + CONFIG.LIST_ITEM_MAX_WIDTH,
 		})
 
-		-- Second copy for looping (disabled if reversing/ping-ponging)
 		if scroll_x > 0 and not state.is_reversing then
 			table.insert(cmds, {
 				type = "text",
@@ -288,8 +281,6 @@ function draw_screen(state)
 
 	-- ===== 5. Now-playing bar =====
 	local np_y = CONTENT_BOTTOM
-
-	-- gradient fade to obscure peeking track from list
 
 	table.insert(cmds, {
 		type = "gradient_rect",
@@ -330,13 +321,11 @@ function draw_screen(state)
 				color = COLOR_ART_FRAME,
 			})
 		end
-		--
-		--
+
 		-- Title / artist
 		local text_x = th_x + NOWPLAY_ART + NOWPLAY_PAD
 		local title_y = np_y + NOWPLAY_PAD
 
-		-- Marquee scroll state for the now playing title
 		local now_scroll_x = 0
 		local now_text_w = 0
 		if state.now_scroll then
@@ -356,7 +345,6 @@ function draw_screen(state)
 			clip_right = text_x + CONFIG.NOWPLAY_MAX_WIDTH,
 		})
 
-		-- Second copy for looping (disabled if reversing/ping-ponging)
 		if now_scroll_x > 0 and not state.is_reversing then
 			table.insert(cmds, {
 				type = "text",
@@ -370,7 +358,6 @@ function draw_screen(state)
 			})
 		end
 
-		-- Artist (no scroll yet, usually fits)
 		table.insert(cmds, {
 			type = "text",
 			x = text_x,
@@ -383,9 +370,59 @@ function draw_screen(state)
 		-- Elapsed / duration, right-aligned
 		local time_str = fmt_time(now.elapsed) .. " / " .. fmt_time(now.duration)
 		local approx_w = #time_str * 5
+		local timer_x = SCREEN_W - NOWPLAY_PAD - approx_w
+
+		-- Play/pause indicator: anchor to the timer's *actual* right edge,
+		-- which is timer_x + the measured width of time_str (Rust exposes
+		-- `measure_text` because `approx_w` overestimates by ~1 px/char).
+		local time_w = measure_text(time_str, NOWPLAY_ARTIST_FONT)
+		local ICON_RIGHT = timer_x + time_w
+
+		local STRIPE_W = 2
+		local STRIPE_H = 8
+		local STRIPE_GAP = 3
+		local ICON_RADIUS = 0.8
+		local TRI_W = 8
+		local TRI_H = 8
+
+		if state.is_paused then
+			-- Paused: right-pointing rounded triangle (press to play)
+			table.insert(cmds, {
+				type = "triangle",
+				x = ICON_RIGHT - TRI_W,
+				y = title_y,
+				width = TRI_W,
+				height = TRI_H,
+				radius = 1.0,
+				color = COLOR_NOWPLAY_DIM,
+			})
+		else
+			-- Playing: two thin rounded stripes, right-aligned (press to pause)
+			local total_w = STRIPE_W * 2 + STRIPE_GAP
+			local stripe_x = ICON_RIGHT - total_w
+			table.insert(cmds, {
+				type = "rect",
+				x = stripe_x,
+				y = title_y,
+				width = STRIPE_W,
+				height = STRIPE_H,
+				radius = ICON_RADIUS,
+				color = COLOR_NOWPLAY_DIM,
+			})
+			table.insert(cmds, {
+				type = "rect",
+				x = stripe_x + STRIPE_W + STRIPE_GAP,
+				y = title_y,
+				width = STRIPE_W,
+				height = STRIPE_H,
+				radius = ICON_RADIUS,
+				color = COLOR_NOWPLAY_DIM,
+			})
+		end
+
 		table.insert(cmds, {
 			type = "text",
-			x = SCREEN_W - NOWPLAY_PAD - approx_w,
+			x = timer_x,
 			y = title_y + NOWPLAY_TITLE_FONT + 3,
 			text = time_str,
 			color = COLOR_NOWPLAY_DIM,

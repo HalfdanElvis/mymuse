@@ -25,8 +25,8 @@ pub const SCROLL_START_TIME: f32 = 1.0;
 pub const SCROLL_SPEED: f32 = 30.0;
 pub const MIN_LOOP_DISTANCE: f32 = 20.0;
 
-const SLIDESHOW_INTERVAL: Duration = Duration::from_secs(5);
-const TRANSITION_DURATION: Duration = Duration::from_millis(350);
+const SLIDESHOW_INTERVAL: Duration = Duration::from_secs(4);
+const TRANSITION_DURATION: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy)]
 pub enum UserEvent {
@@ -204,6 +204,11 @@ impl App {
     fn play_track_from_queue(&mut self, track: Track, queue: Vec<Track>, index: usize) {
         match audio::play_track(&self.player, &track.path) {
             Ok(duration) => {
+                // Ensure we're not stuck paused if the user paused the
+                // previous track and then picked / auto-advanced into a new
+                // one. Picking a track should play it.
+                self.player.play();
+
                 self.now_playing_start_time = Instant::now();
                 let art = self.get_art(&(track.artist.clone(), track.album.clone()));
                 self.now_playing = Some(NowPlayingState {
@@ -346,8 +351,18 @@ impl App {
             KeyCode::ArrowDown => self.nav_down(),
             KeyCode::ArrowUp => self.nav_up(),
             KeyCode::Enter => self.nav_enter(),
+            KeyCode::Space => self.toggle_pause(),
             _ => {}
         }
+    }
+
+    fn toggle_pause(&mut self) {
+        if self.player.is_paused() {
+            self.player.play();
+        } else {
+            self.player.pause();
+        }
+        self.request_redraw();
     }
 
     fn nav_back(&mut self) {
@@ -454,6 +469,9 @@ impl App {
             list_scroll,
             now_scroll,
             is_reversing: self.pingpong_scroll,
+            // A track that has finished (player empty) is also "not playing":
+            // show the play triangle rather than the pause stripes.
+            is_paused: self.player.is_paused() || self.player.empty(),
         };
 
         let buffer = self.ui.draw(frame);

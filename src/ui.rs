@@ -1,6 +1,7 @@
 use fontdue::{Font, FontSettings};
 use mlua::{Lua, Table};
 use std::fs;
+use std::sync::Arc;
 use tiny_skia::{
     Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, Point, Rect,
     SpreadMode, Transform,
@@ -32,6 +33,7 @@ pub struct UiFrame<'a> {
     pub now_scroll: Option<(f32, f32)>,
     pub is_reversing: bool,
     pub scroll_offset: usize,
+    pub is_paused: bool,
 }
 
 pub struct LayoutConfig {
@@ -47,7 +49,7 @@ pub struct LayoutConfig {
 pub struct UiEngine {
     lua: Lua,
     pixmap: Pixmap,
-    font: Font,
+    font: Arc<Font>,
     line_ratio: f32,
     pub layout: LayoutConfig,
     buffer: Vec<u32>,
@@ -62,8 +64,9 @@ impl UiEngine {
 
         let font_data = fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
             .expect("Could not find font file");
-        let font =
-            Font::from_bytes(font_data, FontSettings::default()).expect("Failed to parse font");
+        let font = Arc::new(
+            Font::from_bytes(font_data, FontSettings::default()).expect("Failed to parse font"),
+        );
 
         let line_ratio = font
             .horizontal_line_metrics(16.0)
@@ -73,6 +76,26 @@ impl UiEngine {
         let lua = Lua::new();
         let script = fs::read_to_string("ui.lua").expect("Could not find ui.lua");
         lua.load(&script).exec().expect("Failed to run Lua script");
+
+        // Expose `measure_text(text, size)` to Lua so layout code can
+        // right-align against actual rendered width instead of guessing.
+        // Shares the same `Arc<Font>` as the Rust-side `measure_text`.
+        {
+            let font_for_lua = font.clone();
+            let measure_fn = lua
+                .create_function(move |_, (text, size): (String, f32)| {
+                    let mut width = 0.0f32;
+                    for c in text.chars() {
+                        let (metrics, _) = font_for_lua.rasterize(c, size);
+                        width += metrics.advance_width;
+                    }
+                    Ok(width)
+                })
+                .expect("Failed to create Lua measure_text");
+            lua.globals()
+                .set("measure_text", measure_fn)
+                .expect("Failed to register Lua measure_text");
+        }
 
         let config_fn: mlua::Function = lua.globals().get("get_layout_config").unwrap();
         let config_table: mlua::Table = config_fn.call(()).unwrap();
@@ -102,8 +125,6 @@ impl UiEngine {
     pub fn draw(&mut self, frame: UiFrame) -> &[u32] {
         self.pixmap.fill(Color::from_rgba8(0, 0, 0, 255));
 
-        // Copy the borrowed-art handles out before we borrow `frame` for the
-        // state table — `Option<&AlbumArt>` and `f32` are both Copy.
         let pane_art_prev = frame.pane_art_prev;
         let pane_art = frame.pane_art;
         let pane_art_progress = frame.pane_art_progress;
@@ -121,20 +142,15 @@ impl UiEngine {
                 "rect" => self.draw_rect(&cmd),
                 "gradient_rect" => self.draw_gradient_rect(&cmd),
                 "text" => self.draw_text(&cmd),
+                "triangle" => self.draw_triangle(&cmd),
                 "album_art_prev" => {
-                    // Only used when fading out to the placeholder. When
-                    // there's an incoming cover, the `album_art` arm
-                    // crossfades both in a single pass.
                     if pane_art.is_none() {
-                        self.draw_album_art(
-                            &cmd,
-                            pane_art_prev,
-                            (1.0 - pane_art_progress) * 255.0,
-                        );
+                        self.draw_album_art(&cmd, pane_art_prev, (1.0 - pane_art_progress) * 255.0);
                     }
                 }
-                "album_art" => self
-                    .draw_album_art_crossfade(&cmd, pane_art_prev, pane_art, pane_art_progress),
+                "album_art" => {
+                    self.draw_album_art_crossfade(&cmd, pane_art_prev, pane_art, pane_art_progress)
+                }
                 "now_art_thumb" => self.draw_album_art(&cmd, now_art, 255.0),
                 _ => {}
             }
@@ -170,6 +186,7 @@ impl UiEngine {
         state
             .set("has_pane_art_prev", frame.pane_art_prev.is_some())
             .unwrap();
+        state.set("is_paused", frame.is_paused).unwrap();
 
         if let Some(np) = &frame.now {
             let table = self.lua.create_table().unwrap();
@@ -214,6 +231,7 @@ impl UiEngine {
         let w: f32 = cmd.get("width").unwrap();
         let h: f32 = cmd.get("height").unwrap();
         let color_hex: u32 = cmd.get("color").unwrap();
+        let radius: f32 = cmd.get("radius").ok().unwrap_or(0.0);
 
         let color = Color::from_rgba8(
             ((color_hex >> 16) & 0xFF) as u8,
@@ -224,15 +242,51 @@ impl UiEngine {
 
         let mut paint = Paint::default();
         paint.set_color(color);
-        let rect = Rect::from_xywh(x, y, w, h).unwrap();
-        let path = PathBuilder::from_rect(rect);
-        self.pixmap.fill_path(
-            &path,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
+
+        let path = if radius > 0.0 {
+            rounded_rect_path(x, y, w, h, radius)
+        } else {
+            Rect::from_xywh(x, y, w, h).map(PathBuilder::from_rect)
+        };
+
+        if let Some(path) = path {
+            self.pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+
+    fn draw_triangle(&mut self, cmd: &Table) {
+        let x: f32 = cmd.get("x").unwrap();
+        let y: f32 = cmd.get("y").unwrap();
+        let w: f32 = cmd.get("width").unwrap();
+        let h: f32 = cmd.get("height").unwrap();
+        let color_hex: u32 = cmd.get("color").unwrap();
+        let radius: f32 = cmd.get("radius").ok().unwrap_or(0.0);
+
+        let color = Color::from_rgba8(
+            ((color_hex >> 16) & 0xFF) as u8,
+            ((color_hex >> 8) & 0xFF) as u8,
+            (color_hex & 0xFF) as u8,
+            ((color_hex >> 24) & 0xFF) as u8,
         );
+
+        let mut paint = Paint::default();
+        paint.set_color(color);
+
+        if let Some(path) = rounded_triangle_path(x, y, w, h, radius) {
+            self.pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
     }
 
     fn draw_gradient_rect(&mut self, cmd: &Table) {
@@ -349,10 +403,6 @@ impl UiEngine {
         }
     }
 
-    /// Bilinear-sampled, cover-cropped blit of `art` into the rect described
-    /// by `cmd`. `alpha_mult` (0..=255) scales the whole image; the command's
-    /// optional `alpha` field (0..=255, default 255) multiplies on top so Lua
-    /// can still dim individual placements.
     fn draw_album_art(&mut self, cmd: &Table, art: Option<&AlbumArt>, alpha_mult: f32) {
         let Some(art) = art else { return };
         let x: f32 = cmd.get("x").unwrap();
@@ -364,8 +414,7 @@ impl UiEngine {
         if w <= 0.0 || h <= 0.0 || art.width == 0 || art.height == 0 {
             return;
         }
-        let alpha =
-            (alpha_mult.clamp(0.0, 255.0) * cmd_alpha.clamp(0.0, 255.0)) / (255.0 * 255.0);
+        let alpha = (alpha_mult.clamp(0.0, 255.0) * cmd_alpha.clamp(0.0, 255.0)) / (255.0 * 255.0);
         if alpha <= 0.0 {
             return;
         }
@@ -484,6 +533,77 @@ impl UiEngine {
         }
         width
     }
+}
+
+fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
+    let r = radius.min(w / 2.0).min(h / 2.0);
+    if r <= 0.0 {
+        let rect = Rect::from_xywh(x, y, w, h)?;
+        return Some(PathBuilder::from_rect(rect));
+    }
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.quad_to(x + w, y, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.quad_to(x, y + h, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.quad_to(x, y, x + r, y);
+    pb.close();
+    pb.finish()
+}
+
+fn rounded_triangle_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
+    let (ax, ay) = (x, y);
+    let (bx, by) = (x, y + h);
+    let (cx, cy) = (x + w, y + h / 2.0);
+
+    let dist = |px: f32, py: f32, qx: f32, qy: f32| -> f32 {
+        ((qx - px).powi(2) + (qy - py).powi(2)).sqrt()
+    };
+    let lerp = |px: f32, py: f32, qx: f32, qy: f32, t: f32| -> (f32, f32) {
+        (px + (qx - px) * t, py + (qy - py) * t)
+    };
+
+    let ab_len = dist(ax, ay, bx, by);
+    let ac_len = dist(ax, ay, cx, cy);
+    let bc_len = dist(bx, by, cx, cy);
+
+    let r_ab = if ab_len > 0.0 {
+        (radius / ab_len).min(0.5)
+    } else {
+        0.0
+    };
+    let r_ac = if ac_len > 0.0 {
+        (radius / ac_len).min(0.5)
+    } else {
+        0.0
+    };
+    let r_bc = if bc_len > 0.0 {
+        (radius / bc_len).min(0.5)
+    } else {
+        0.0
+    };
+
+    let (a_bx, a_by) = lerp(ax, ay, bx, by, r_ab);
+    let (a_cx, a_cy) = lerp(ax, ay, cx, cy, r_ac);
+    let (b_ax, b_ay) = lerp(bx, by, ax, ay, r_ab);
+    let (b_cx, b_cy) = lerp(bx, by, cx, cy, r_bc);
+    let (c_ax, c_ay) = lerp(cx, cy, ax, ay, r_ac);
+    let (c_bx, c_by) = lerp(cx, cy, bx, by, r_bc);
+
+    let mut pb = PathBuilder::new();
+    pb.move_to(a_bx, a_by);
+    pb.line_to(b_ax, b_ay);
+    pb.quad_to(bx, by, b_cx, b_cy);
+    pb.line_to(c_bx, c_by);
+    pb.quad_to(cx, cy, c_ax, c_ay);
+    pb.line_to(a_cx, a_cy);
+    pb.quad_to(ax, ay, a_bx, a_by);
+    pb.close();
+    pb.finish()
 }
 
 struct ArtSampler<'a> {
