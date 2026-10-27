@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 use std::time::Instant;
 
+use crate::nav::Level;
 use crate::ui::{NowPlaying, UiFrame};
 
 use super::util::{clock_string, level_title};
@@ -13,7 +14,6 @@ impl App {
         let (level, selected_index, scroll_offset) = self.nav.current().clone();
         let title = level_title(&level);
 
-        // Reset header-scroll timer whenever the header text changes (level change).
         if self.last_header_title.as_deref() != Some(title.as_str()) {
             self.last_header_title = Some(title.clone());
             self.header_scroll_start = Instant::now();
@@ -23,6 +23,13 @@ impl App {
         let now_art_owned = self.now_playing.as_ref().and_then(|np| np.art.clone());
 
         let items_slice = self.nav.get_items();
+
+        let is_settings = matches!(level, Level::Settings);
+        let option_values: Option<Vec<String>> = if is_settings {
+            Some(self.nav.settings.values())
+        } else {
+            None
+        };
 
         let now_view = self.now_playing.as_ref().map(|np| NowPlaying {
             title: &np.track.title,
@@ -49,8 +56,10 @@ impl App {
             now_scroll_elapsed: self.now_playing_start_time.elapsed().as_secs_f32(),
             header_scroll_elapsed: self.header_scroll_start.elapsed().as_secs_f32(),
             artist_scroll_elapsed: self.now_playing_start_time.elapsed().as_secs_f32(),
-            is_reversing: self.pingpong_scroll,
+            is_reversing: self.nav.settings.pingpong_scroll,
             is_paused: self.player.is_paused() || self.player.empty(),
+            is_settings,
+            option_values: option_values.as_deref(),
         };
 
         let buffer = self.ui.draw(frame);

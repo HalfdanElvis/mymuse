@@ -1,7 +1,5 @@
 -- ui.lua
 
--- Scroll tuning (previously Rust consts; now live here since Lua owns
--- the scroll math).
 local SCROLL_START_TIME = 1.0
 local SCROLL_SPEED = 30.0
 local MIN_LOOP_DISTANCE = 20.0
@@ -11,10 +9,6 @@ local function fmt_time(seconds)
 	return string.format("%d:%02d", math.floor(seconds / 60), seconds % 60)
 end
 
--- Compute (offset, text_width) for a scrolling label.
---   elapsed  = seconds since the scroll timer was (re)started
---   pingpong = bounce back and forth instead of looping
--- Mirrors what `scroll_state` + `get_textloop_offset` used to do in Rust.
 local function scroll_offset(text, font_size, max_width, gap, elapsed, pingpong)
 	if not elapsed or elapsed <= SCROLL_START_TIME then
 		return 0.0, 0.0
@@ -136,9 +130,12 @@ function draw_screen(state)
 	local ART_PAD = 8
 	local ART_PANEL_W = ART_SIZE + ART_PAD * 2
 
+	local is_settings = state.is_settings or false
+
 	local LIST_X = 0
-	local LIST_W = SCREEN_W - ART_PANEL_W
+	local LIST_W = is_settings and SCREEN_W or (SCREEN_W - ART_PANEL_W)
 	local LIST_PAD_X = CONFIG.LIST_PAD_X
+	local list_item_max_width = LIST_W - (LIST_PAD_X * 2)
 	local ITEM_FONT = CONFIG.ITEM_FONT
 	local ITEM_VPAD = 4
 	local ITEM_LINE_H = ITEM_FONT * (state.line_height_ratio or 1.0)
@@ -257,45 +254,47 @@ function draw_screen(state)
 		})
 	end
 
-	-- ===== 3. Right album-art panel =====
-	local art_x = SCREEN_W - ART_PANEL_W + ART_PAD
-	local art_y = CONTENT_TOP + math.floor((CONTENT_H - ART_SIZE) / 2)
-	local art_color = ART_PLACEHOLDER_COLORS[((selected - 1) % #ART_PLACEHOLDER_COLORS) + 1]
+	-- ===== 3. Right album-art panel (hidden on Settings) =====
+	if not is_settings then
+		local art_x = SCREEN_W - ART_PANEL_W + ART_PAD
+		local art_y = CONTENT_TOP + math.floor((CONTENT_H - ART_SIZE) / 2)
+		local art_color = ART_PLACEHOLDER_COLORS[((selected - 1) % #ART_PLACEHOLDER_COLORS) + 1]
 
-	table.insert(cmds, {
-		type = "rect",
-		x = art_x - 2,
-		y = art_y - 2,
-		width = ART_SIZE + 4,
-		height = ART_SIZE + 4,
-		color = COLOR_ART_FRAME,
-	})
-	if state.has_pane_art_prev then
-		table.insert(cmds, {
-			type = "album_art_prev",
-			x = art_x,
-			y = art_y,
-			width = ART_SIZE,
-			height = ART_SIZE,
-		})
-	end
-	if state.has_pane_art then
-		table.insert(cmds, {
-			type = "album_art",
-			x = art_x,
-			y = art_y,
-			width = ART_SIZE,
-			height = ART_SIZE,
-		})
-	elseif not state.has_pane_art_prev then
 		table.insert(cmds, {
 			type = "rect",
-			x = art_x,
-			y = art_y,
-			width = ART_SIZE,
-			height = ART_SIZE,
-			color = art_color,
+			x = art_x - 2,
+			y = art_y - 2,
+			width = ART_SIZE + 4,
+			height = ART_SIZE + 4,
+			color = COLOR_ART_FRAME,
 		})
+		if state.has_pane_art_prev then
+			table.insert(cmds, {
+				type = "album_art_prev",
+				x = art_x,
+				y = art_y,
+				width = ART_SIZE,
+				height = ART_SIZE,
+			})
+		end
+		if state.has_pane_art then
+			table.insert(cmds, {
+				type = "album_art",
+				x = art_x,
+				y = art_y,
+				width = ART_SIZE,
+				height = ART_SIZE,
+			})
+		elseif not state.has_pane_art_prev then
+			table.insert(cmds, {
+				type = "rect",
+				x = art_x,
+				y = art_y,
+				width = ART_SIZE,
+				height = ART_SIZE,
+				color = art_color,
+			})
+		end
 	end
 
 	-- ===== 4. List =====
@@ -305,49 +304,77 @@ function draw_screen(state)
 
 	for i = first, last do
 		local y = CONTENT_TOP + (i - first) * ITEM_H
+		local selected_here = (i == selected)
 
-		local scroll_x, text_w = 0.0, 0.0
-		if i == selected then
-			scroll_x, text_w = scroll_offset(
-				state.items[i],
-				ITEM_FONT,
-				CONFIG.LIST_ITEM_MAX_WIDTH,
-				CONFIG.LIST_SCROLL_GAP,
-				state.list_scroll_elapsed,
-				state.is_reversing
-			)
-		end
-
-		if i == selected then
+		if selected_here then
 			table.insert(
 				cmds,
 				{ type = "rect", x = LIST_X, y = y, width = LIST_W, height = ITEM_H, color = COLOR_SELECTED }
 			)
 		end
 
-		local draw_x = LIST_X + LIST_PAD_X - scroll_x
-		table.insert(cmds, {
-			type = "text",
-			x = draw_x,
-			y = y + ITEM_TEXT_PAD_Y,
-			text = state.items[i],
-			color = COLOR_ITEM_TEXT,
-			size = ITEM_FONT,
-			clip_left = LIST_X + LIST_PAD_X,
-			clip_right = LIST_X + LIST_PAD_X + CONFIG.LIST_ITEM_MAX_WIDTH,
-		})
+		if is_settings then
+			local label = state.items[i] or ""
+			local val = "<" .. (state.option_values and state.option_values[i] or "") .. ">"
+			local val_w = measure_text(val, ITEM_FONT)
+			local val_x = LIST_X + LIST_W - LIST_PAD_X - val_w
+			local label_clip_left = LIST_X + LIST_PAD_X
+			local label_clip_right = val_x - 4
 
-		if scroll_x > 0 and not state.is_reversing then
 			table.insert(cmds, {
 				type = "text",
-				x = draw_x + text_w + CONFIG.LIST_SCROLL_GAP,
+				x = label_clip_left,
+				y = y + ITEM_TEXT_PAD_Y,
+				text = label,
+				color = COLOR_ITEM_TEXT,
+				size = ITEM_FONT,
+				clip_left = label_clip_left,
+				clip_right = label_clip_right,
+			})
+			table.insert(cmds, {
+				type = "text",
+				x = val_x,
+				y = y + ITEM_TEXT_PAD_Y,
+				text = val,
+				color = COLOR_NOWPLAY_DIM,
+				size = ITEM_FONT,
+			})
+		else
+			local scroll_x, text_w = 0.0, 0.0
+			if selected_here then
+				scroll_x, text_w = scroll_offset(
+					state.items[i],
+					ITEM_FONT,
+					list_item_max_width,
+					CONFIG.LIST_SCROLL_GAP,
+					state.list_scroll_elapsed,
+					state.is_reversing
+				)
+			end
+
+			local draw_x = LIST_X + LIST_PAD_X - scroll_x
+			table.insert(cmds, {
+				type = "text",
+				x = draw_x,
 				y = y + ITEM_TEXT_PAD_Y,
 				text = state.items[i],
 				color = COLOR_ITEM_TEXT,
 				size = ITEM_FONT,
 				clip_left = LIST_X + LIST_PAD_X,
-				clip_right = LIST_X + LIST_PAD_X + CONFIG.LIST_ITEM_MAX_WIDTH,
+				clip_right = LIST_X + LIST_PAD_X + list_item_max_width,
 			})
+			if scroll_x > 0 and not state.is_reversing then
+				table.insert(cmds, {
+					type = "text",
+					x = draw_x + text_w + CONFIG.LIST_SCROLL_GAP,
+					y = y + ITEM_TEXT_PAD_Y,
+					text = state.items[i],
+					color = COLOR_ITEM_TEXT,
+					size = ITEM_FONT,
+					clip_left = LIST_X + LIST_PAD_X,
+					clip_right = LIST_X + LIST_PAD_X + list_item_max_width,
+				})
+			end
 		end
 	end
 
@@ -396,7 +423,6 @@ function draw_screen(state)
 		local text_x = th_x + NOWPLAY_ART + NOWPLAY_PAD
 		local title_y = np_y + NOWPLAY_PAD
 
-		-- Title scroll
 		local now_scroll_x, now_text_w = scroll_offset(
 			now.title or "",
 			NOWPLAY_TITLE_FONT,
@@ -430,7 +456,6 @@ function draw_screen(state)
 			})
 		end
 
-		-- Artist scroll
 		local artist_scroll_x, artist_text_w = scroll_offset(
 			now.artist or "",
 			NOWPLAY_ARTIST_FONT,
@@ -468,7 +493,6 @@ function draw_screen(state)
 			})
 		end
 
-		-- Timer + play/pause icon
 		local time_str = fmt_time(now.elapsed) .. " / " .. fmt_time(now.duration)
 		local approx_w = #time_str * 5
 		local timer_x = SCREEN_W - NOWPLAY_PAD - approx_w

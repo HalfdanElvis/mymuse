@@ -3,6 +3,7 @@ mod app;
 mod audio;
 mod library;
 mod nav;
+mod settings;
 mod system;
 mod ui;
 
@@ -35,7 +36,7 @@ fn main() {
     // Navigation setup (Build the state tree!)
     let nav = NavState::new(lib);
 
-    // Hardware info. Swap back to `MockSystemInfo` for UI previews.
+    // Hardware info
     let system_info: Box<dyn SystemInfo> = Box::new(LinuxSystemInfo::new());
 
     // EventLoop setup

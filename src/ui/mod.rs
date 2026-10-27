@@ -28,9 +28,6 @@ pub struct UiFrame<'a> {
     pub pane_art_prev: Option<&'a AlbumArt>,
     pub pane_art: Option<&'a AlbumArt>,
     pub pane_art_progress: f32,
-    /// Seconds since the respective scroll timers were (re)started. Lua
-    /// computes the resulting scroll offset from these and its own layout
-    /// constants — Rust no longer needs to know font sizes or max widths.
     pub list_scroll_elapsed: f32,
     pub now_scroll_elapsed: f32,
     pub header_scroll_elapsed: f32,
@@ -38,6 +35,11 @@ pub struct UiFrame<'a> {
     pub is_reversing: bool,
     pub scroll_offset: usize,
     pub is_paused: bool,
+    /// True on the Settings level: hide the album-art panel, full-width list,
+    /// render each row as label-left / `<value>`-right.
+    pub is_settings: bool,
+    /// Parallel to `items`, only when `is_settings` is true.
+    pub option_values: Option<&'a [String]>,
 }
 
 pub struct UiEngine {
@@ -169,6 +171,7 @@ impl UiEngine {
             .set("has_pane_art_prev", frame.pane_art_prev.is_some())
             .unwrap();
         state.set("is_paused", frame.is_paused).unwrap();
+        state.set("is_settings", frame.is_settings).unwrap();
         state
             .set("list_scroll_elapsed", frame.list_scroll_elapsed)
             .unwrap();
@@ -181,6 +184,14 @@ impl UiEngine {
         state
             .set("artist_scroll_elapsed", frame.artist_scroll_elapsed)
             .unwrap();
+
+        if let Some(vals) = frame.option_values {
+            let t = self.lua.create_table().unwrap();
+            for (i, v) in vals.iter().enumerate() {
+                t.set(i + 1, v.clone()).unwrap();
+            }
+            state.set("option_values", t).unwrap();
+        }
 
         if let Some(np) = &frame.now {
             let table = self.lua.create_table().unwrap();

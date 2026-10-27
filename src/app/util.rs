@@ -17,6 +17,7 @@ pub(super) fn level_title(level: &Level) -> String {
         Level::TracksOf(a, al) => format!("{} - {}", a, al),
         Level::AllAlbums => "Albums".to_string(),
         Level::AllSongs => "Songs".to_string(),
+        Level::Settings => "Settings".to_string(),
     }
 }
 

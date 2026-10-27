@@ -1,4 +1,5 @@
 use crate::library::{Library, Track};
+use crate::settings::Settings;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -9,10 +10,12 @@ pub enum Level {
     TracksOf(String, String),
     AllAlbums,
     AllSongs,
+    Settings,
 }
 
 pub struct NavState {
     pub library: Library,
+    pub settings: Settings,
     pub level_stack: Vec<(Level, usize, usize)>,
 
     all_albums_list: Vec<(String, String)>,
@@ -24,6 +27,7 @@ impl NavState {
     pub fn new(library: Library) -> Self {
         let mut state = Self {
             library,
+            settings: Settings::new(),
             level_stack: vec![(Level::Root, 0, 0)],
             all_albums_list: Vec::new(),
             all_songs_cache: Vec::new(),
@@ -54,7 +58,7 @@ impl NavState {
                 .all_songs_cache
                 .get(*idx)
                 .map(|t| (t.artist.clone(), t.album.clone())),
-            Level::Root | Level::Artists => None,
+            Level::Root | Level::Artists | Level::Settings => None,
         }
     }
 
@@ -118,6 +122,7 @@ impl NavState {
                 .iter()
                 .map(|t| t.title.clone())
                 .collect(),
+            Level::Settings => self.settings.items(),
         };
     }
 
@@ -149,7 +154,8 @@ impl NavState {
     // --- Navigation -----------------------------------------------------
 
     /// Returns `Some(index_into_current_playlist)` when the caller should
-    /// start playback; `None` when this was a menu drill-down.
+    /// start playback; `None` when this was a menu drill-down or a settings
+    /// cycle.
     pub fn enter(&mut self) -> Option<usize> {
         let (level, selected_idx, _) = self.current().clone();
         if self.items_cache.is_empty() {
@@ -177,6 +183,10 @@ impl NavState {
                 false
             }
             Level::AllSongs => true,
+            Level::Settings => {
+                self.settings.cycle(selected_idx);
+                false
+            }
         };
 
         if play {
@@ -195,7 +205,8 @@ impl NavState {
                 self.rebuild_all_songs_cache();
                 self.level_stack.push((Level::AllSongs, 0, 0));
             }
-            _ => {} // Settings
+            "Settings" => self.level_stack.push((Level::Settings, 0, 0)),
+            _ => {}
         }
     }
 

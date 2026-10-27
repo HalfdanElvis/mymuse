@@ -58,7 +58,6 @@ pub struct App {
     now_playing_start_time: Instant,
     header_scroll_start: Instant,
     last_header_title: Option<String>,
-    pingpong_scroll: bool,
     pane_art: PaneArtState,
     art_cache: ArtCache,
     seek_hold: Option<SeekHold>,
@@ -74,7 +73,7 @@ impl App {
     ) -> Self {
         let art_cache = Self::preload_album_art(&nav);
 
-        Self {
+        let mut app = Self {
             window: None,
             surface: None,
             ui,
@@ -87,11 +86,16 @@ impl App {
             now_playing_start_time: Instant::now(),
             header_scroll_start: Instant::now(),
             last_header_title: None,
-            pingpong_scroll: true,
             pane_art: PaneArtState::new(),
             art_cache,
             seek_hold: None,
-        }
+        };
+
+        // Populate pane art before the first render so we never draw the
+        // placeholder box while waiting for the first tick.
+        app.update_pane_art();
+
+        app
     }
 
     fn request_redraw(&self) {

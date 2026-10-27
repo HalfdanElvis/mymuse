@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use crate::library::AlbumArt;
 use crate::nav::Level;
 
-use super::util::pseudo_random_index;
 use super::App;
+use super::util::pseudo_random_index;
 
 pub(super) const SLIDESHOW_INTERVAL: Duration = Duration::from_secs(4);
 pub(super) const TRANSITION_DURATION: Duration = Duration::from_millis(500);
@@ -52,6 +52,10 @@ impl App {
 
     pub(super) fn update_pane_art(&mut self) {
         let level = self.nav.current().0.clone();
+
+        if matches!(level, Level::Settings) {
+            return;
+        }
 
         let desired = if matches!(level, Level::Root | Level::Artists) {
             self.slideshow_pick(&level)

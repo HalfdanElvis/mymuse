@@ -146,7 +146,7 @@ impl UiEngine {
             .map(|r| r.round() as i32)
             .unwrap_or(self.width as i32);
 
-        let mut pen_x = x;
+        let mut pen_x = x.round();
         for c in text.chars() {
             if pen_x >= right_limit as f32 {
                 break;
@@ -187,12 +187,7 @@ impl UiEngine {
         }
     }
 
-    pub(super) fn draw_album_art(
-        &mut self,
-        cmd: &Table,
-        art: Option<&AlbumArt>,
-        alpha_mult: f32,
-    ) {
+    pub(super) fn draw_album_art(&mut self, cmd: &Table, art: Option<&AlbumArt>, alpha_mult: f32) {
         let Some(art) = art else { return };
         let x: f32 = cmd.get("x").unwrap();
         let y: f32 = cmd.get("y").unwrap();
@@ -203,8 +198,7 @@ impl UiEngine {
         if w <= 0.0 || h <= 0.0 || art.width == 0 || art.height == 0 {
             return;
         }
-        let alpha =
-            (alpha_mult.clamp(0.0, 255.0) * cmd_alpha.clamp(0.0, 255.0)) / (255.0 * 255.0);
+        let alpha = (alpha_mult.clamp(0.0, 255.0) * cmd_alpha.clamp(0.0, 255.0)) / (255.0 * 255.0);
         if alpha <= 0.0 {
             return;
         }
@@ -266,6 +260,14 @@ impl UiEngine {
         if prev_s.is_none() && curr_s.is_none() {
             return;
         }
+
+        let p = if prev_s.is_none() {
+            1.0
+        } else if curr_s.is_none() {
+            0.0
+        } else {
+            p
+        };
 
         let px_start = x.round() as i32;
         let py_start = y.round() as i32;
@@ -336,13 +338,7 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny
     pb.finish()
 }
 
-fn rounded_triangle_path(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    radius: f32,
-) -> Option<tiny_skia::Path> {
+fn rounded_triangle_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
     let (ax, ay) = (x, y);
     let (bx, by) = (x, y + h);
     let (cx, cy) = (x + w, y + h / 2.0);
