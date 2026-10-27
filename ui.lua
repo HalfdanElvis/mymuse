@@ -199,18 +199,20 @@ function draw_screen(state)
 		height = ART_SIZE + 4,
 		color = COLOR_ART_FRAME,
 	})
-	if state.has_pane_art then
-		-- Black backing so the slideshow fade-in blends from black, not the
-		-- placeholder color bleeding through. Rust applies the fade via
-		-- pane_art_alpha (base alpha); we don't need to pass `alpha` here.
+
+	-- Draw the previous album art underneath (if it exists)
+	if state.has_pane_art_prev then
 		table.insert(cmds, {
-			type = "rect",
+			type = "album_art_prev",
 			x = art_x,
 			y = art_y,
 			width = ART_SIZE,
 			height = ART_SIZE,
-			color = 0xFF000000,
 		})
+	end
+
+	-- Draw the new album art on top (Rust handles the wipe based on progress)
+	if state.has_pane_art then
 		table.insert(cmds, {
 			type = "album_art",
 			x = art_x,
@@ -218,9 +220,8 @@ function draw_screen(state)
 			width = ART_SIZE,
 			height = ART_SIZE,
 		})
-	else
-		-- No art (album has no embedded cover, or we're on a level without a
-		-- single album context): show the colored placeholder as before.
+	elseif not state.has_pane_art_prev then
+		-- Fallback placeholder if neither current nor previous art exists
 		table.insert(cmds, {
 			type = "rect",
 			x = art_x,

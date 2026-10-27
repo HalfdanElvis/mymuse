@@ -25,8 +25,8 @@ pub const SCROLL_START_TIME: f32 = 1.0;
 pub const SCROLL_SPEED: f32 = 30.0;
 pub const MIN_LOOP_DISTANCE: f32 = 20.0;
 
-const SLIDESHOW_INTERVAL: Duration = Duration::from_secs(8);
-const SLIDESHOW_FADE_MS: f32 = 400.0;
+const SLIDESHOW_INTERVAL: Duration = Duration::from_secs(5);
+const TRANSITION_DURATION: Duration = Duration::from_millis(350);
 
 #[derive(Debug, Clone, Copy)]
 pub enum UserEvent {
@@ -42,28 +42,28 @@ struct NowPlayingState {
     art: Option<Arc<AlbumArt>>,
 }
 
-struct SlideshowState {
+struct PaneArtState {
     current: Option<(String, String)>,
+    previous: Option<(String, String)>,
     context_artist: Option<String>,
     last_swap: Instant,
-    fade_start: Instant,
+    transition_start: Instant,
 }
 
-impl SlideshowState {
+impl PaneArtState {
     fn new() -> Self {
         Self {
             current: None,
+            previous: None,
             context_artist: None,
             last_swap: Instant::now(),
-            fade_start: Instant::now(),
+            transition_start: Instant::now(),
         }
     }
-    fn alpha(&self) -> f32 {
-        if SLIDESHOW_FADE_MS <= 0.0 {
-            return 255.0;
-        }
-        let elapsed_ms = self.fade_start.elapsed().as_secs_f32() * 1000.0;
-        (elapsed_ms / SLIDESHOW_FADE_MS).min(1.0) * 255.0
+
+    fn progress(&self) -> f32 {
+        (self.transition_start.elapsed().as_secs_f32() / TRANSITION_DURATION.as_secs_f32())
+            .clamp(0.0, 1.0)
     }
 }
 
@@ -101,7 +101,7 @@ pub struct App {
     hover_start_time: Instant,
     now_playing_start_time: Instant,
     pingpong_scroll: bool,
-    slideshow: SlideshowState,
+    pane_art: PaneArtState,
     art_cache: ArtCache,
 }
 
@@ -128,7 +128,7 @@ impl App {
             hover_start_time: Instant::now(),
             now_playing_start_time: Instant::now(),
             pingpong_scroll: true,
-            slideshow: SlideshowState::new(),
+            pane_art: PaneArtState::new(),
             art_cache,
         }
     }
@@ -187,23 +187,18 @@ impl App {
         self.art_cache.get(key)
     }
 
-    fn get_pane_art(&self) -> (Option<Arc<AlbumArt>>, f32) {
-        let on_slideshow_level = matches!(self.nav.current().0, Level::Root | Level::Artists);
-        if on_slideshow_level {
-            let art = self
-                .slideshow
-                .current
+    fn get_pane_art(&self) -> (Option<Arc<AlbumArt>>, Option<Arc<AlbumArt>>, f32) {
+        let progress = self.pane_art.progress();
+        let curr = self.pane_art.current.as_ref().and_then(|k| self.get_art(k));
+        let prev = if progress < 1.0 {
+            self.pane_art
+                .previous
                 .as_ref()
-                .and_then(|k| self.get_art(k));
-            (art, self.slideshow.alpha())
+                .and_then(|k| self.get_art(k))
         } else {
-            let art = self
-                .nav
-                .current_album_context()
-                .as_ref()
-                .and_then(|k| self.get_art(k));
-            (art, 255.0)
-        }
+            None
+        };
+        (prev, curr, progress)
     }
 
     fn play_track_from_queue(&mut self, track: Track, queue: Vec<Track>, index: usize) {
@@ -247,35 +242,40 @@ impl App {
         if let Some((track, queue, idx)) = self.next_track_if_ended() {
             self.play_track_from_queue(track, queue, idx);
         }
-        self.update_slideshow();
+        self.update_pane_art();
         self.request_redraw();
     }
 
-    fn update_slideshow(&mut self) {
+    fn update_pane_art(&mut self) {
         let level = self.nav.current().0.clone();
 
-        // Only Root and Artists levels run the slideshow.
-        if !matches!(level, Level::Root | Level::Artists) {
-            return;
-        }
+        let desired = if matches!(level, Level::Root | Level::Artists) {
+            self.slideshow_pick(&level)
+        } else {
+            self.nav.current_album_context()
+        };
 
-        // On Artists, scope to the hovered artist; on Root, use all albums.
+        if desired != self.pane_art.current {
+            self.pane_art.previous = self.pane_art.current.take();
+            self.pane_art.current = desired;
+            self.pane_art.transition_start = Instant::now();
+        }
+    }
+
+    fn slideshow_pick(&mut self, level: &Level) -> Option<(String, String)> {
         let context_artist = match level {
             Level::Artists => self.nav.hovered_artist(),
             _ => None,
         };
 
-        // Cursor moved to a different artist → swap immediately, don't wait
-        // out the 8 s timer.
-        let context_changed = self.slideshow.context_artist != context_artist;
+        let context_changed = self.pane_art.context_artist != context_artist;
         let fresh_enough = !context_changed
-            && self.slideshow.current.is_some()
-            && self.slideshow.last_swap.elapsed() < SLIDESHOW_INTERVAL;
+            && self.pane_art.current.is_some()
+            && self.pane_art.last_swap.elapsed() < SLIDESHOW_INTERVAL;
         if fresh_enough {
-            return;
+            return self.pane_art.current.clone();
         }
 
-        // Build the candidate pool.
         let pool: Vec<(String, String)> = match &context_artist {
             Some(artist) => self
                 .nav
@@ -287,35 +287,23 @@ impl App {
             None => self.nav.all_albums().to_vec(),
         };
 
+        self.pane_art.context_artist = context_artist;
+        self.pane_art.last_swap = Instant::now();
+
         if pool.is_empty() {
-            // No albums for this artist (or empty library) — clear the pane
-            // rather than showing a stale cover from a different artist.
-            self.slideshow.current = None;
-            self.slideshow.context_artist = context_artist;
-            return;
+            return None;
+        }
+        if pool.len() == 1 {
+            return Some(pool[0].clone());
         }
 
-        // Single album: show it, but don't re-fade every 8 s for no reason.
-        if pool.len() == 1 && self.slideshow.current.as_ref() == Some(&pool[0]) {
-            self.slideshow.last_swap = Instant::now();
-            self.slideshow.context_artist = context_artist;
-            return;
-        }
-
-        // Pick a random album, avoiding an immediate repeat when possible.
         let mut idx = pseudo_random_index(pool.len());
-        if pool.len() > 1 {
-            if let Some(cur) = &self.slideshow.current {
-                if &pool[idx] == cur {
-                    idx = (idx + 1) % pool.len();
-                }
+        if let Some(cur) = &self.pane_art.current {
+            if &pool[idx] == cur {
+                idx = (idx + 1) % pool.len();
             }
         }
-
-        self.slideshow.current = Some(pool[idx].clone());
-        self.slideshow.context_artist = context_artist;
-        self.slideshow.last_swap = Instant::now();
-        self.slideshow.fade_start = Instant::now();
+        Some(pool[idx].clone())
     }
 
     fn scroll_state(
@@ -417,7 +405,7 @@ impl App {
         let (level, selected_index, scroll_offset) = self.nav.current().clone();
         let title = level_title(&level);
 
-        let (pane_art_owned, pane_art_alpha) = self.get_pane_art();
+        let (pane_art_prev, pane_art_curr, pane_art_progress) = self.get_pane_art();
         let now_art_owned = self.now_playing.as_ref().and_then(|np| np.art.clone());
 
         let items_slice = self.nav.get_items();
@@ -460,8 +448,9 @@ impl App {
             headphones: self.headphones,
             now: now_view,
             now_art: now_art_owned.as_deref(),
-            pane_art: pane_art_owned.as_deref(),
-            pane_art_alpha,
+            pane_art_prev: pane_art_prev.as_deref(),
+            pane_art: pane_art_curr.as_deref(),
+            pane_art_progress,
             list_scroll,
             now_scroll,
             is_reversing: self.pingpong_scroll,

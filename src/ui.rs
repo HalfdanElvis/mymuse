@@ -25,8 +25,9 @@ pub struct UiFrame<'a> {
     pub headphones: bool,
     pub now: Option<NowPlaying<'a>>,
     pub now_art: Option<&'a AlbumArt>,
+    pub pane_art_prev: Option<&'a AlbumArt>,
     pub pane_art: Option<&'a AlbumArt>,
-    pub pane_art_alpha: f32,
+    pub pane_art_progress: f32,
     pub list_scroll: Option<(f32, f32)>,
     pub now_scroll: Option<(f32, f32)>,
     pub is_reversing: bool,
@@ -103,8 +104,9 @@ impl UiEngine {
 
         // Copy the borrowed-art handles out before we borrow `frame` for the
         // state table — `Option<&AlbumArt>` and `f32` are both Copy.
+        let pane_art_prev = frame.pane_art_prev;
         let pane_art = frame.pane_art;
-        let pane_alpha = frame.pane_art_alpha;
+        let pane_art_progress = frame.pane_art_progress;
         let now_art = frame.now_art;
 
         let state = self.build_state_table(&frame);
@@ -119,7 +121,20 @@ impl UiEngine {
                 "rect" => self.draw_rect(&cmd),
                 "gradient_rect" => self.draw_gradient_rect(&cmd),
                 "text" => self.draw_text(&cmd),
-                "album_art" => self.draw_album_art(&cmd, pane_art, pane_alpha),
+                "album_art_prev" => {
+                    // Only used when fading out to the placeholder. When
+                    // there's an incoming cover, the `album_art` arm
+                    // crossfades both in a single pass.
+                    if pane_art.is_none() {
+                        self.draw_album_art(
+                            &cmd,
+                            pane_art_prev,
+                            (1.0 - pane_art_progress) * 255.0,
+                        );
+                    }
+                }
+                "album_art" => self
+                    .draw_album_art_crossfade(&cmd, pane_art_prev, pane_art, pane_art_progress),
                 "now_art_thumb" => self.draw_album_art(&cmd, now_art, 255.0),
                 _ => {}
             }
@@ -152,7 +167,9 @@ impl UiEngine {
         state.set("scroll_offset", frame.scroll_offset).unwrap();
         state.set("has_pane_art", frame.pane_art.is_some()).unwrap();
         state.set("has_now_art", frame.now_art.is_some()).unwrap();
-        state.set("pane_art_alpha", frame.pane_art_alpha).unwrap();
+        state
+            .set("has_pane_art_prev", frame.pane_art_prev.is_some())
+            .unwrap();
 
         if let Some(np) = &frame.now {
             let table = self.lua.create_table().unwrap();
@@ -333,10 +350,10 @@ impl UiEngine {
     }
 
     /// Bilinear-sampled, cover-cropped blit of `art` into the rect described
-    /// by `cmd`. `base_alpha` (0..=255) lets the caller fade the whole image;
-    /// the command's optional `alpha` field (0..=255, default 255) multiplies
-    /// on top so Lua can still dim individual placements.
-    fn draw_album_art(&mut self, cmd: &Table, art: Option<&AlbumArt>, base_alpha: f32) {
+    /// by `cmd`. `alpha_mult` (0..=255) scales the whole image; the command's
+    /// optional `alpha` field (0..=255, default 255) multiplies on top so Lua
+    /// can still dim individual placements.
+    fn draw_album_art(&mut self, cmd: &Table, art: Option<&AlbumArt>, alpha_mult: f32) {
         let Some(art) = art else { return };
         let x: f32 = cmd.get("x").unwrap();
         let y: f32 = cmd.get("y").unwrap();
@@ -347,87 +364,113 @@ impl UiEngine {
         if w <= 0.0 || h <= 0.0 || art.width == 0 || art.height == 0 {
             return;
         }
-        let alpha = (base_alpha.clamp(0.0, 255.0) * cmd_alpha.clamp(0.0, 255.0))
-            / (255.0 * 255.0);
+        let alpha =
+            (alpha_mult.clamp(0.0, 255.0) * cmd_alpha.clamp(0.0, 255.0)) / (255.0 * 255.0);
         if alpha <= 0.0 {
             return;
         }
 
-        // Cover: scale so image fills the rect, crop overflow centered.
-        let scale = (w / art.width as f32).max(h / art.height as f32);
-        let offset_x = (art.width as f32 * scale - w) / 2.0;
-        let offset_y = (art.height as f32 * scale - h) / 2.0;
-
+        let sampler = ArtSampler::new(art, w, h);
         let px_start = x.round() as i32;
         let py_start = y.round() as i32;
-        let x_max = art.width as i32 - 1;
-        let y_max = art.height as i32 - 1;
         let rows = h.round() as i32;
         let cols = w.round() as i32;
 
         for row in 0..rows {
-            let sy = (row as f32 + offset_y) / scale;
-            let y0 = sy.floor() as i32;
-            let wy = sy - y0 as f32;
-            let y0c = y0.clamp(0, y_max);
-            let y1c = (y0 + 1).clamp(0, y_max);
-
+            let dy = py_start + row;
+            if dy < 0 || dy >= self.height as i32 {
+                continue;
+            }
             for col in 0..cols {
-                let sx = (col as f32 + offset_x) / scale;
-                let x0 = sx.floor() as i32;
-                let wx = sx - x0 as f32;
-                let x0c = x0.clamp(0, x_max);
-                let x1c = (x0 + 1).clamp(0, x_max);
-
-                let i00 = y0c as usize * art.width + x0c as usize;
-                let i10 = y0c as usize * art.width + x1c as usize;
-                let i01 = y1c as usize * art.width + x0c as usize;
-                let i11 = y1c as usize * art.width + x1c as usize;
-
-                let c00 = art.rgba[i00];
-                let c10 = art.rgba[i10];
-                let c01 = art.rgba[i01];
-                let c11 = art.rgba[i11];
-
-                let w00 = (1.0 - wx) * (1.0 - wy);
-                let w10 = wx * (1.0 - wy);
-                let w01 = (1.0 - wx) * wy;
-                let w11 = wx * wy;
-
-                let r = w00 * c00[0] as f32
-                    + w10 * c10[0] as f32
-                    + w01 * c01[0] as f32
-                    + w11 * c11[0] as f32;
-                let g = w00 * c00[1] as f32
-                    + w10 * c10[1] as f32
-                    + w01 * c01[1] as f32
-                    + w11 * c11[1] as f32;
-                let b = w00 * c00[2] as f32
-                    + w10 * c10[2] as f32
-                    + w01 * c01[2] as f32
-                    + w11 * c11[2] as f32;
-                let a = w00 * c00[3] as f32
-                    + w10 * c10[3] as f32
-                    + w01 * c01[3] as f32
-                    + w11 * c11[3] as f32;
-
+                let dx = px_start + col;
+                if dx < 0 || dx >= self.width as i32 {
+                    continue;
+                }
+                let [r, g, b, a] = sampler.sample(col as f32, row as f32);
                 let src_a = (a / 255.0) * alpha;
                 if src_a <= 0.0 {
                     continue;
                 }
+                let dst_idx = dy as usize * self.width + dx as usize;
+                let dst = &mut self.pixmap.pixels_mut()[dst_idx];
+                let fr = (r * src_a + dst.red() as f32 * (1.0 - src_a)) as u8;
+                let fg = (g * src_a + dst.green() as f32 * (1.0 - src_a)) as u8;
+                let fb = (b * src_a + dst.blue() as f32 * (1.0 - src_a)) as u8;
+                *dst = tiny_skia::PremultipliedColorU8::from_rgba(fr, fg, fb, 255).unwrap();
+            }
+        }
+    }
 
+    fn draw_album_art_crossfade(
+        &mut self,
+        cmd: &Table,
+        prev: Option<&AlbumArt>,
+        curr: Option<&AlbumArt>,
+        progress: f32,
+    ) {
+        let x: f32 = cmd.get("x").unwrap();
+        let y: f32 = cmd.get("y").unwrap();
+        let w: f32 = cmd.get("width").unwrap();
+        let h: f32 = cmd.get("height").unwrap();
+        let cmd_alpha: f32 = cmd.get("alpha").ok().unwrap_or(255.0) / 255.0;
+
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let p = progress.clamp(0.0, 1.0);
+        let prev_s = prev
+            .filter(|a| a.width > 0 && a.height > 0)
+            .map(|a| ArtSampler::new(a, w, h));
+        let curr_s = curr
+            .filter(|a| a.width > 0 && a.height > 0)
+            .map(|a| ArtSampler::new(a, w, h));
+        if prev_s.is_none() && curr_s.is_none() {
+            return;
+        }
+
+        let px_start = x.round() as i32;
+        let py_start = y.round() as i32;
+        let rows = h.round() as i32;
+        let cols = w.round() as i32;
+
+        for row in 0..rows {
+            let dy = py_start + row;
+            if dy < 0 || dy >= self.height as i32 {
+                continue;
+            }
+            for col in 0..cols {
                 let dx = px_start + col;
-                let dy = py_start + row;
-                if dx < 0 || dy < 0 || dx >= self.width as i32 || dy >= self.height as i32 {
+                if dx < 0 || dx >= self.width as i32 {
+                    continue;
+                }
+
+                let mut acc = [0.0f32; 4];
+                if p < 1.0 {
+                    if let Some(s) = &prev_s {
+                        let c = s.sample(col as f32, row as f32);
+                        for i in 0..4 {
+                            acc[i] += c[i] * (1.0 - p);
+                        }
+                    }
+                }
+                if p > 0.0 {
+                    if let Some(s) = &curr_s {
+                        let c = s.sample(col as f32, row as f32);
+                        for i in 0..4 {
+                            acc[i] += c[i] * p;
+                        }
+                    }
+                }
+
+                let src_a = (acc[3] / 255.0) * cmd_alpha;
+                if src_a <= 0.0 {
                     continue;
                 }
                 let dst_idx = dy as usize * self.width + dx as usize;
                 let dst = &mut self.pixmap.pixels_mut()[dst_idx];
-
-                let fr = (r * src_a + dst.red() as f32 * (1.0 - src_a)) as u8;
-                let fg = (g * src_a + dst.green() as f32 * (1.0 - src_a)) as u8;
-                let fb = (b * src_a + dst.blue() as f32 * (1.0 - src_a)) as u8;
-
+                let fr = (acc[0] * src_a + dst.red() as f32 * (1.0 - src_a)) as u8;
+                let fg = (acc[1] * src_a + dst.green() as f32 * (1.0 - src_a)) as u8;
+                let fb = (acc[2] * src_a + dst.blue() as f32 * (1.0 - src_a)) as u8;
                 *dst = tiny_skia::PremultipliedColorU8::from_rgba(fr, fg, fb, 255).unwrap();
             }
         }
@@ -440,5 +483,57 @@ impl UiEngine {
             width += metrics.advance_width;
         }
         width
+    }
+}
+
+struct ArtSampler<'a> {
+    art: &'a AlbumArt,
+    scale: f32,
+    offset_x: f32,
+    offset_y: f32,
+}
+
+impl<'a> ArtSampler<'a> {
+    fn new(art: &'a AlbumArt, w: f32, h: f32) -> Self {
+        let scale = (w / art.width as f32).max(h / art.height as f32);
+        Self {
+            art,
+            scale,
+            offset_x: (art.width as f32 * scale - w) / 2.0,
+            offset_y: (art.height as f32 * scale - h) / 2.0,
+        }
+    }
+
+    fn sample(&self, col: f32, row: f32) -> [f32; 4] {
+        let art = self.art;
+        let sx = (col + self.offset_x) / self.scale;
+        let sy = (row + self.offset_y) / self.scale;
+        let x0 = sx.floor() as i32;
+        let y0 = sy.floor() as i32;
+        let wx = sx - x0 as f32;
+        let wy = sy - y0 as f32;
+        let x_max = art.width as i32 - 1;
+        let y_max = art.height as i32 - 1;
+        let x0c = x0.clamp(0, x_max) as usize;
+        let x1c = (x0 + 1).clamp(0, x_max) as usize;
+        let y0c = y0.clamp(0, y_max) as usize;
+        let y1c = (y0 + 1).clamp(0, y_max) as usize;
+
+        let c00 = art.rgba[y0c * art.width + x0c];
+        let c10 = art.rgba[y0c * art.width + x1c];
+        let c01 = art.rgba[y1c * art.width + x0c];
+        let c11 = art.rgba[y1c * art.width + x1c];
+
+        let w00 = (1.0 - wx) * (1.0 - wy);
+        let w10 = wx * (1.0 - wy);
+        let w01 = (1.0 - wx) * wy;
+        let w11 = wx * wy;
+
+        [
+            w00 * c00[0] as f32 + w10 * c10[0] as f32 + w01 * c01[0] as f32 + w11 * c11[0] as f32,
+            w00 * c00[1] as f32 + w10 * c10[1] as f32 + w01 * c01[1] as f32 + w11 * c11[1] as f32,
+            w00 * c00[2] as f32 + w10 * c10[2] as f32 + w01 * c01[2] as f32 + w11 * c11[2] as f32,
+            w00 * c00[3] as f32 + w10 * c10[3] as f32 + w01 * c01[3] as f32 + w11 * c11[3] as f32,
+        ]
     }
 }
