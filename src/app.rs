@@ -17,6 +17,7 @@ use winit::{
 use crate::audio;
 use crate::library::{self, AlbumArt, Track};
 use crate::nav::{Level, NavState};
+use crate::system::SystemInfo;
 use crate::ui::{NowPlaying, UiEngine, UiFrame};
 
 pub const WIDTH: u32 = 320;
@@ -104,9 +105,7 @@ pub struct App {
     player: Player,
     _audio_handle: rodio::MixerDeviceSink,
     now_playing: Option<NowPlayingState>,
-    battery: f32,
-    bluetooth: bool,
-    headphones: bool,
+    system_info: Box<dyn SystemInfo>,
     nav: NavState,
     hover_start_time: Instant,
     now_playing_start_time: Instant,
@@ -124,6 +123,7 @@ impl App {
         nav: NavState,
         player: Player,
         audio_handle: rodio::MixerDeviceSink,
+        system_info: Box<dyn SystemInfo>,
     ) -> Self {
         let art_cache = Self::preload_album_art(&nav);
 
@@ -134,9 +134,7 @@ impl App {
             player,
             _audio_handle: audio_handle,
             now_playing: None,
-            battery: 1.0,
-            bluetooth: false,
-            headphones: false,
+            system_info,
             nav,
             hover_start_time: Instant::now(),
             now_playing_start_time: Instant::now(),
@@ -650,9 +648,9 @@ impl App {
             scroll_offset,
             title: &title,
             clock: &clock,
-            battery: self.battery,
-            bluetooth: self.bluetooth,
-            headphones: self.headphones,
+            battery: self.system_info.battery(),
+            bluetooth: self.system_info.bluetooth(),
+            headphones: self.system_info.headphones(),
             now: now_view,
             now_art: now_art_owned.as_deref(),
             pane_art_prev: pane_art_prev.as_deref(),
